@@ -1,0 +1,34 @@
+{
+  "type": "agent_event",
+  "payload": {
+    "event_seq": 1,
+    "event_id": "evt_example_001",
+    "source_event_id": "src_example_001",
+    "timestamp": "2026-03-19T18:27:16.855012Z",
+    "session_id": "sess_demo_001",
+    "adapter_id": "playwright_native",
+    "adapter_run_id": "run_demo_001",
+    "agent_id": "main_001",
+    "parent_agent_id": null,
+    "agent_kind": "main",
+    "environment_id": "env_browser_main",
+    "visibility_mode": "foreground",
+    "action_type": "click",
+    "state": "clicking",
+    "summary_text": "Clicking Search",
+    "intent": "Open the search results",
+    "risk_level": "none",
+    "subagent_source": null,
+    "cursor": {
+      "x": 420,
+      "y": 220
+    },
+    "target_rect": {
+      "x": 380,
+      "y": 190,
+      "width": 80,
+      "height": 60
+    },
+    "meta": {}
+  }
+}

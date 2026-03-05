@@ -1,0 +1,12 @@
+{
+  "type": "background_worker_update",
+  "payload": {
+    "session_id": "sess_demo_001",
+    "adapter_id": "playwright_native",
+    "adapter_run_id": "run_demo_001",
+    "agent_id": "worker_001",
+    "summary_text": "Comparing hotel ratings in the background",
+    "state": "running",
+    "timestamp": "2026-03-19T18:27:16.855030Z"
+  }
+}

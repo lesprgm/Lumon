@@ -1,0 +1,11 @@
+{
+  "type": "error",
+  "payload": {
+    "code": "INVALID_STATE",
+    "message": "Cannot resume from current state",
+    "session_id": "sess_demo_001",
+    "command_type": "resume",
+    "checkpoint_id": null,
+    "protocol_version": "1.3.1"
+  }
+}

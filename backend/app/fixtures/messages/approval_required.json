@@ -1,0 +1,15 @@
+{
+  "type": "approval_required",
+  "payload": {
+    "session_id": "sess_demo_001",
+    "checkpoint_id": "chk_demo_001",
+    "event_id": "evt_submit_001",
+    "action_type": "click",
+    "summary_text": "Ready to submit search",
+    "intent": "Submit the shortlist form",
+    "risk_level": "high",
+    "risk_reason": "Final irreversible transition",
+    "adapter_id": "playwright_native",
+    "adapter_run_id": "run_demo_001"
+  }
+}
