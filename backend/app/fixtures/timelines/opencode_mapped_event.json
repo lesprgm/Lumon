@@ -1,0 +1,39 @@
+[
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "agent_event",
+      "payload": {
+        "event_seq": 9,
+        "event_id": "evt_opencode_001",
+        "source_event_id": "src_opencode_001",
+        "timestamp": "2026-03-19T18:27:16.856683Z",
+        "session_id": "sess_demo_001",
+        "adapter_id": "opencode",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "main_001",
+        "parent_agent_id": null,
+        "agent_kind": "main",
+        "environment_id": "env_browser_main",
+        "visibility_mode": "foreground",
+        "action_type": "read",
+        "state": "reading",
+        "summary_text": "OpenCode reads repository context",
+        "intent": "Inspect project state before acting",
+        "risk_level": "none",
+        "subagent_source": null,
+        "cursor": {
+          "x": 640,
+          "y": 240
+        },
+        "target_rect": {
+          "x": 580,
+          "y": 200,
+          "width": 200,
+          "height": 72
+        },
+        "meta": {}
+      }
+    }
+  }
+]
