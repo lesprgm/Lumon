@@ -1,0 +1,102 @@
+[
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "running",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 50,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "pause_requested",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 100,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "paused",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 100,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "running",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  }
+]

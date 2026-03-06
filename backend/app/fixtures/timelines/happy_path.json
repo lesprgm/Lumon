@@ -1,0 +1,472 @@
+[
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "idle",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 100,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "starting",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 100,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "running",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "frame",
+      "payload": {
+        "mime_type": "image/jpeg",
+        "data_base64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAQABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD6cooooA//2Q==",
+        "frame_seq": 1
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "agent_event",
+      "payload": {
+        "event_seq": 1,
+        "event_id": "evt_nav_001",
+        "source_event_id": "src_nav_001",
+        "timestamp": "2026-03-19T18:27:16.856647Z",
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "main_001",
+        "parent_agent_id": null,
+        "agent_kind": "main",
+        "environment_id": "env_browser_main",
+        "visibility_mode": "foreground",
+        "action_type": "navigate",
+        "state": "navigating",
+        "summary_text": "Opening travel site",
+        "intent": "Navigate to the hotel search page",
+        "risk_level": "none",
+        "subagent_source": null,
+        "cursor": {
+          "x": 220,
+          "y": 120
+        },
+        "target_rect": {
+          "x": 160,
+          "y": 80,
+          "width": 220,
+          "height": 60
+        },
+        "meta": {}
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "agent_event",
+      "payload": {
+        "event_seq": 2,
+        "event_id": "evt_click_001",
+        "source_event_id": "src_click_001",
+        "timestamp": "2026-03-19T18:27:16.856658Z",
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "main_001",
+        "parent_agent_id": null,
+        "agent_kind": "main",
+        "environment_id": "env_browser_main",
+        "visibility_mode": "foreground",
+        "action_type": "click",
+        "state": "clicking",
+        "summary_text": "Opening destination input",
+        "intent": "Focus the destination field",
+        "risk_level": "none",
+        "subagent_source": null,
+        "cursor": {
+          "x": 340,
+          "y": 255
+        },
+        "target_rect": {
+          "x": 300,
+          "y": 230,
+          "width": 80,
+          "height": 40
+        },
+        "meta": {}
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "agent_event",
+      "payload": {
+        "event_seq": 3,
+        "event_id": "evt_type_001",
+        "source_event_id": "src_type_001",
+        "timestamp": "2026-03-19T18:27:16.856661Z",
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "main_001",
+        "parent_agent_id": null,
+        "agent_kind": "main",
+        "environment_id": "env_browser_main",
+        "visibility_mode": "foreground",
+        "action_type": "type",
+        "state": "typing",
+        "summary_text": "Entering travel details",
+        "intent": "Type the destination and dates",
+        "risk_level": "none",
+        "subagent_source": null,
+        "cursor": {
+          "x": 355,
+          "y": 255
+        },
+        "target_rect": {
+          "x": 300,
+          "y": 230,
+          "width": 260,
+          "height": 40
+        },
+        "meta": {
+          "masked": true,
+          "text_mask": "***"
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "background_worker_update",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "worker_001",
+        "summary_text": "Comparing hotel ratings in the background",
+        "state": "running",
+        "timestamp": "2026-03-19T18:27:16.856875Z"
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "waiting_for_approval",
+        "interaction_mode": "approval",
+        "active_checkpoint_id": "chk_demo_001",
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "agent_event",
+      "payload": {
+        "event_seq": 4,
+        "event_id": "evt_submit_001",
+        "source_event_id": "src_submit_001",
+        "timestamp": "2026-03-19T18:27:16.856670Z",
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "main_001",
+        "parent_agent_id": null,
+        "agent_kind": "main",
+        "environment_id": "env_browser_main",
+        "visibility_mode": "foreground",
+        "action_type": "click",
+        "state": "clicking",
+        "summary_text": "Ready to submit search",
+        "intent": "Submit the search form",
+        "risk_level": "high",
+        "subagent_source": null,
+        "cursor": {
+          "x": 680,
+          "y": 640
+        },
+        "target_rect": {
+          "x": 620,
+          "y": 610,
+          "width": 120,
+          "height": 52
+        },
+        "meta": {}
+      }
+    }
+  },
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "approval_required",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "checkpoint_id": "chk_demo_001",
+        "event_id": "evt_submit_001",
+        "action_type": "click",
+        "summary_text": "Ready to submit search",
+        "intent": "Submit the shortlist form",
+        "risk_level": "high",
+        "risk_reason": "Final irreversible transition",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001"
+      }
+    }
+  },
+  {
+    "delay_ms": 200,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "running",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "agent_event",
+      "payload": {
+        "event_seq": 5,
+        "event_id": "evt_sub_spawn_001",
+        "source_event_id": "src_sub_spawn_001",
+        "timestamp": "2026-03-19T18:27:16.856673Z",
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "subagent_001",
+        "parent_agent_id": "main_001",
+        "agent_kind": "same_scene_subagent",
+        "environment_id": "env_browser_main",
+        "visibility_mode": "same_scene_visible",
+        "action_type": "spawn_subagent",
+        "state": "handoff",
+        "summary_text": "Helper checks hotel ratings",
+        "intent": "Verify rating quality for shortlisted hotels",
+        "risk_level": "none",
+        "subagent_source": "simulated",
+        "cursor": {
+          "x": 900,
+          "y": 420
+        },
+        "target_rect": {
+          "x": 860,
+          "y": 380,
+          "width": 140,
+          "height": 60
+        },
+        "meta": {}
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "agent_event",
+      "payload": {
+        "event_seq": 6,
+        "event_id": "evt_sub_done_001",
+        "source_event_id": "src_sub_done_001",
+        "timestamp": "2026-03-19T18:27:16.856676Z",
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "subagent_001",
+        "parent_agent_id": "main_001",
+        "agent_kind": "same_scene_subagent",
+        "environment_id": "env_browser_main",
+        "visibility_mode": "same_scene_visible",
+        "action_type": "subagent_result",
+        "state": "done",
+        "summary_text": "Helper returned rating summary",
+        "intent": "Return hotel rating findings",
+        "risk_level": "none",
+        "subagent_source": "simulated",
+        "cursor": {
+          "x": 930,
+          "y": 410
+        },
+        "target_rect": {
+          "x": 860,
+          "y": 380,
+          "width": 160,
+          "height": 60
+        },
+        "meta": {}
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "agent_event",
+      "payload": {
+        "event_seq": 7,
+        "event_id": "evt_complete_001",
+        "source_event_id": "src_complete_001",
+        "timestamp": "2026-03-19T18:27:16.856678Z",
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "agent_id": "main_001",
+        "parent_agent_id": null,
+        "agent_kind": "main",
+        "environment_id": "env_browser_main",
+        "visibility_mode": "foreground",
+        "action_type": "complete",
+        "state": "done",
+        "summary_text": "Shortlist complete",
+        "intent": "Present final shortlist",
+        "risk_level": "none",
+        "subagent_source": null,
+        "cursor": {
+          "x": 790,
+          "y": 210
+        },
+        "target_rect": {
+          "x": 720,
+          "y": 170,
+          "width": 140,
+          "height": 54
+        },
+        "meta": {}
+      }
+    }
+  },
+  {
+    "delay_ms": 80,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "completed",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "task_result",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "status": "completed",
+        "summary_text": "Shortlisted three hotels under budget",
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001"
+      }
+    }
+  }
+]

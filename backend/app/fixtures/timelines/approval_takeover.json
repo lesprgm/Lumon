@@ -1,0 +1,152 @@
+[
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "waiting_for_approval",
+        "interaction_mode": "approval",
+        "active_checkpoint_id": "chk_demo_001",
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "approval_required",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "checkpoint_id": "chk_demo_001",
+        "event_id": "evt_submit_001",
+        "action_type": "click",
+        "summary_text": "Ready to submit search",
+        "intent": "Submit the shortlist form",
+        "risk_level": "high",
+        "risk_reason": "Final irreversible transition",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001"
+      }
+    }
+  },
+  {
+    "delay_ms": 100,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "takeover",
+        "interaction_mode": "takeover",
+        "active_checkpoint_id": "chk_demo_001",
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 100,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "paused",
+        "interaction_mode": "watch",
+        "active_checkpoint_id": null,
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "error",
+      "payload": {
+        "code": "CHECKPOINT_STALE",
+        "message": "Checkpoint invalidated by takeover",
+        "session_id": "sess_demo_001",
+        "command_type": null,
+        "checkpoint_id": "chk_demo_001",
+        "protocol_version": "1.3.1"
+      }
+    }
+  },
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "session_state",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001",
+        "state": "waiting_for_approval",
+        "interaction_mode": "approval",
+        "active_checkpoint_id": "chk_demo_002",
+        "task_text": "Find a hotel in NYC next weekend under $250",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "capabilities": {
+          "supports_pause": true,
+          "supports_approval": true,
+          "supports_takeover": true,
+          "supports_frames": true
+        }
+      }
+    }
+  },
+  {
+    "delay_ms": 0,
+    "message": {
+      "type": "approval_required",
+      "payload": {
+        "session_id": "sess_demo_001",
+        "checkpoint_id": "chk_demo_002",
+        "event_id": "evt_submit_001",
+        "action_type": "click",
+        "summary_text": "Ready to submit search",
+        "intent": "Submit the shortlist form",
+        "risk_level": "high",
+        "risk_reason": "Final irreversible transition",
+        "adapter_id": "playwright_native",
+        "adapter_run_id": "run_demo_001"
+      }
+    }
+  }
+]
