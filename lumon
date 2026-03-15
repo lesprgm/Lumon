@@ -1,0 +1,50 @@
+#!/bin/zsh
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  cat >&2 <<'EOF'
+Usage:
+  ./lumon setup
+  ./lumon doctor
+  ./lumon triage [--tail-lines N] [--no-bundle]
+  ./lumon restart [--force]
+  ./lumon app [--web-mode observe_only|delegate_playwright] [--auto-delegate]
+
+Internal / debug:
+  # End users should run plain: opencode .
+  ./lumon opencode [--wrapper-options ... -- opencode-args ...]
+  ./lumon fast-open [--wrapper-options ... -- opencode-args ...]
+EOF
+  exit 1
+fi
+
+subcommand="$1"
+shift
+
+case "$subcommand" in
+  setup)
+    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_setup.py" "$@"
+    ;;
+  doctor)
+    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_doctor.py" "$@"
+    ;;
+  triage)
+    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_triage.py" "$@"
+    ;;
+  restart)
+    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_restart.py" "$@"
+    ;;
+  app)
+    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_app.py" "$@"
+    ;;
+  opencode)
+    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_opencode.py" "$@"
+    ;;
+  fast-open)
+    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_fast_open.py" "$@"
+    ;;
+  *)
+    echo "Unknown subcommand: $subcommand" >&2
+    exit 1
+    ;;
+esac
