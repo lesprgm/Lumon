@@ -1,0 +1,244 @@
+{
+  "canvas_size": {
+    "width": 747,
+    "height": 571
+  },
+  "states": {
+    "idle": {
+      "source": "lobster sprite/idle/Gemini_Generated_Image_z78a34z78a34z78a.png",
+      "frame_count": 7,
+      "scale_factor": 1.0,
+      "frame_boxes": [
+        {
+          "x0": 75,
+          "y0": 120,
+          "x1": 697,
+          "y1": 568,
+          "width": 622,
+          "height": 448
+        },
+        {
+          "x0": 827,
+          "y0": 120,
+          "x1": 1447,
+          "y1": 568,
+          "width": 620,
+          "height": 448
+        },
+        {
+          "x0": 1584,
+          "y0": 107,
+          "x1": 2206,
+          "y1": 569,
+          "width": 622,
+          "height": 462
+        },
+        {
+          "x0": 2321,
+          "y0": 123,
+          "x1": 2941,
+          "y1": 572,
+          "width": 620,
+          "height": 449
+        },
+        {
+          "x0": 3073,
+          "y0": 123,
+          "x1": 3690,
+          "y1": 571,
+          "width": 617,
+          "height": 448
+        },
+        {
+          "x0": 3820,
+          "y0": 122,
+          "x1": 4445,
+          "y1": 568,
+          "width": 625,
+          "height": 446
+        },
+        {
+          "x0": 4563,
+          "y0": 123,
+          "x1": 5187,
+          "y1": 574,
+          "width": 624,
+          "height": 451
+        }
+      ],
+      "normalized_canvas": {
+        "width": 747,
+        "height": 571
+      }
+    },
+    "busy": {
+      "source": "lobster sprite/busy/Gemini_Generated_Image_y7dv63y7dv63y7dv-2.png",
+      "frame_count": 5,
+      "scale_factor": 1.7647,
+      "frame_boxes": [
+        {
+          "x0": 121,
+          "y0": 621,
+          "x1": 508,
+          "y1": 910,
+          "width": 387,
+          "height": 289
+        },
+        {
+          "x0": 658,
+          "y0": 621,
+          "x1": 1063,
+          "y1": 910,
+          "width": 405,
+          "height": 289
+        },
+        {
+          "x0": 1214,
+          "y0": 621,
+          "x1": 1602,
+          "y1": 910,
+          "width": 388,
+          "height": 289
+        },
+        {
+          "x0": 1764,
+          "y0": 622,
+          "x1": 2161,
+          "y1": 910,
+          "width": 397,
+          "height": 288
+        },
+        {
+          "x0": 2309,
+          "y0": 621,
+          "x1": 2696,
+          "y1": 910,
+          "width": 387,
+          "height": 289
+        }
+      ],
+      "normalized_canvas": {
+        "width": 747,
+        "height": 571
+      }
+    },
+    "success": {
+      "source": "lobster sprite/success/Gemini_Generated_Image_lrve0klrve0klrve.png",
+      "frame_count": 6,
+      "scale_factor": 1.0,
+      "frame_boxes": [
+        {
+          "x0": 82,
+          "y0": 195,
+          "x1": 789,
+          "y1": 710,
+          "width": 707,
+          "height": 515
+        },
+        {
+          "x0": 931,
+          "y0": 193,
+          "x1": 1637,
+          "y1": 698,
+          "width": 706,
+          "height": 505
+        },
+        {
+          "x0": 1776,
+          "y0": 151,
+          "x1": 2476,
+          "y1": 683,
+          "width": 700,
+          "height": 532
+        },
+        {
+          "x0": 2613,
+          "y0": 75,
+          "x1": 3311,
+          "y1": 604,
+          "width": 698,
+          "height": 529
+        },
+        {
+          "x0": 3491,
+          "y0": 196,
+          "x1": 4192,
+          "y1": 704,
+          "width": 701,
+          "height": 508
+        },
+        {
+          "x0": 4349,
+          "y0": 204,
+          "x1": 5054,
+          "y1": 714,
+          "width": 705,
+          "height": 510
+        }
+      ],
+      "normalized_canvas": {
+        "width": 747,
+        "height": 571
+      }
+    },
+    "error": {
+      "source": "lobster sprite/error/Gemini_Generated_Image_ycpn0fycpn0fycpn.png",
+      "frame_count": 6,
+      "scale_factor": 1.0,
+      "frame_boxes": [
+        {
+          "x0": 78,
+          "y0": 162,
+          "x1": 780,
+          "y1": 690,
+          "width": 702,
+          "height": 528
+        },
+        {
+          "x0": 915,
+          "y0": 162,
+          "x1": 1622,
+          "y1": 689,
+          "width": 707,
+          "height": 527
+        },
+        {
+          "x0": 1769,
+          "y0": 162,
+          "x1": 2478,
+          "y1": 697,
+          "width": 709,
+          "height": 535
+        },
+        {
+          "x0": 2674,
+          "y0": 199,
+          "x1": 3357,
+          "y1": 738,
+          "width": 683,
+          "height": 539
+        },
+        {
+          "x0": 3506,
+          "y0": 161,
+          "x1": 4212,
+          "y1": 694,
+          "width": 706,
+          "height": 533
+        },
+        {
+          "x0": 4343,
+          "y0": 163,
+          "x1": 5033,
+          "y1": 694,
+          "width": 690,
+          "height": 531
+        }
+      ],
+      "normalized_canvas": {
+        "width": 747,
+        "height": 571
+      }
+    }
+  }
+}
