@@ -1,0 +1,327 @@
+{
+  "canvas_size": {
+    "width": 968,
+    "height": 721
+  },
+  "states": {
+    "idle": {
+      "source": "dog sprite/idle/seedream_idle_20260314_011416_01.png",
+      "frame_count": 6,
+      "scale_factor": 1.0,
+      "frame_boxes": [
+        {
+          "x0": 73,
+          "y0": 847,
+          "x1": 341,
+          "y1": 1199,
+          "width": 268,
+          "height": 352
+        },
+        {
+          "x0": 341,
+          "y0": 847,
+          "x1": 683,
+          "y1": 1199,
+          "width": 342,
+          "height": 352
+        },
+        {
+          "x0": 683,
+          "y0": 846,
+          "x1": 1024,
+          "y1": 1199,
+          "width": 341,
+          "height": 353
+        },
+        {
+          "x0": 1024,
+          "y0": 846,
+          "x1": 1365,
+          "y1": 1199,
+          "width": 341,
+          "height": 353
+        },
+        {
+          "x0": 1365,
+          "y0": 846,
+          "x1": 1707,
+          "y1": 1199,
+          "width": 342,
+          "height": 353
+        },
+        {
+          "x0": 1707,
+          "y0": 846,
+          "x1": 1963,
+          "y1": 1200,
+          "width": 256,
+          "height": 354
+        }
+      ],
+      "normalized_canvas": {
+        "width": 968,
+        "height": 721
+      }
+    },
+    "busy": {
+      "source": "dog sprite/busy/seedream_busy_20260314_011426_01.png",
+      "frame_count": 6,
+      "scale_factor": 1.0,
+      "frame_boxes": [
+        {
+          "x0": 302,
+          "y0": 451,
+          "x1": 683,
+          "y1": 949,
+          "width": 381,
+          "height": 498
+        },
+        {
+          "x0": 1030,
+          "y0": 451,
+          "x1": 1365,
+          "y1": 952,
+          "width": 335,
+          "height": 501
+        },
+        {
+          "x0": 1686,
+          "y0": 451,
+          "x1": 2048,
+          "y1": 952,
+          "width": 362,
+          "height": 501
+        },
+        {
+          "x0": 290,
+          "y0": 1106,
+          "x1": 683,
+          "y1": 1590,
+          "width": 393,
+          "height": 484
+        },
+        {
+          "x0": 970,
+          "y0": 1106,
+          "x1": 1340,
+          "y1": 1603,
+          "width": 370,
+          "height": 497
+        },
+        {
+          "x0": 1415,
+          "y0": 1106,
+          "x1": 1984,
+          "y1": 1603,
+          "width": 569,
+          "height": 497
+        }
+      ],
+      "normalized_canvas": {
+        "width": 968,
+        "height": 721
+      }
+    },
+    "success": {
+      "source": "dog sprite/success/seedream_success_20260314_011437_01.png",
+      "frame_count": 9,
+      "scale_factor": 1.0,
+      "frame_boxes": [
+        {
+          "x0": 78,
+          "y0": 86,
+          "x1": 677,
+          "y1": 593,
+          "width": 599,
+          "height": 507
+        },
+        {
+          "x0": 728,
+          "y0": 86,
+          "x1": 1315,
+          "y1": 582,
+          "width": 587,
+          "height": 496
+        },
+        {
+          "x0": 1367,
+          "y0": 86,
+          "x1": 1957,
+          "y1": 583,
+          "width": 590,
+          "height": 497
+        },
+        {
+          "x0": 78,
+          "y0": 741,
+          "x1": 683,
+          "y1": 1264,
+          "width": 605,
+          "height": 523
+        },
+        {
+          "x0": 727,
+          "y0": 741,
+          "x1": 1334,
+          "y1": 1264,
+          "width": 607,
+          "height": 523
+        },
+        {
+          "x0": 1366,
+          "y0": 741,
+          "x1": 1988,
+          "y1": 1266,
+          "width": 622,
+          "height": 525
+        },
+        {
+          "x0": 79,
+          "y0": 1409,
+          "x1": 683,
+          "y1": 1931,
+          "width": 604,
+          "height": 522
+        },
+        {
+          "x0": 729,
+          "y0": 1410,
+          "x1": 1337,
+          "y1": 1934,
+          "width": 608,
+          "height": 524
+        },
+        {
+          "x0": 1368,
+          "y0": 1410,
+          "x1": 1986,
+          "y1": 1933,
+          "width": 618,
+          "height": 523
+        }
+      ],
+      "normalized_canvas": {
+        "width": 968,
+        "height": 721
+      }
+    },
+    "error": {
+      "source": "dog sprite/error/seedream_error_20260314_011447_01.png",
+      "frame_count": 6,
+      "scale_factor": 1.0,
+      "frame_boxes": [
+        {
+          "x0": 132,
+          "y0": 286,
+          "x1": 683,
+          "y1": 973,
+          "width": 551,
+          "height": 687
+        },
+        {
+          "x0": 770,
+          "y0": 286,
+          "x1": 1323,
+          "y1": 972,
+          "width": 553,
+          "height": 686
+        },
+        {
+          "x0": 1407,
+          "y0": 286,
+          "x1": 1961,
+          "y1": 973,
+          "width": 554,
+          "height": 687
+        },
+        {
+          "x0": 132,
+          "y0": 1109,
+          "x1": 683,
+          "y1": 1798,
+          "width": 551,
+          "height": 689
+        },
+        {
+          "x0": 770,
+          "y0": 1109,
+          "x1": 1323,
+          "y1": 1798,
+          "width": 553,
+          "height": 689
+        },
+        {
+          "x0": 1407,
+          "y0": 1109,
+          "x1": 1961,
+          "y1": 1798,
+          "width": 554,
+          "height": 689
+        }
+      ],
+      "normalized_canvas": {
+        "width": 968,
+        "height": 721
+      }
+    },
+    "locomotion": {
+      "source": "dog sprite/locomotion/seedream_locomotion_20260314_011502_01.png",
+      "frame_count": 6,
+      "scale_factor": 1.0,
+      "frame_boxes": [
+        {
+          "x0": 73,
+          "y0": 70,
+          "x1": 1009,
+          "y1": 675,
+          "width": 936,
+          "height": 605
+        },
+        {
+          "x0": 1057,
+          "y0": 70,
+          "x1": 1993,
+          "y1": 674,
+          "width": 936,
+          "height": 604
+        },
+        {
+          "x0": 73,
+          "y0": 697,
+          "x1": 1009,
+          "y1": 1298,
+          "width": 936,
+          "height": 601
+        },
+        {
+          "x0": 1057,
+          "y0": 697,
+          "x1": 1993,
+          "y1": 1298,
+          "width": 936,
+          "height": 601
+        },
+        {
+          "x0": 73,
+          "y0": 1365,
+          "x1": 1009,
+          "y1": 1919,
+          "width": 936,
+          "height": 554
+        },
+        {
+          "x0": 1057,
+          "y0": 1365,
+          "x1": 1992,
+          "y1": 1919,
+          "width": 935,
+          "height": 554
+        }
+      ],
+      "normalized_canvas": {
+        "width": 968,
+        "height": 721
+      }
+    }
+  }
+}
