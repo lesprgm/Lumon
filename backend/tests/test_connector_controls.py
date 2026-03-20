@@ -382,6 +382,9 @@ async def test_begin_task_followed_by_same_url_open_skips_duplicate_navigation()
             _ = (html_content, summary_text, intent)
             navigations.append(url)
 
+        async def _emit_event(self, **kwargs):
+            pass
+
     async def fake_sync_page_version(*, force: bool) -> bool:
         _ = force
         connector.current_page_url = "https://www.wikipedia.org"
