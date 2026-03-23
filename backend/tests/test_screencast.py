@@ -93,7 +93,7 @@ async def test_screenshot_poll_streamer_base64_encodes_bytes(
 
     assert page.calls == 1
     assert frames[0]["frame_seq"] == 1
-    assert base64.b64decode(frames[0]["data_base64"]).startswith(b"jpeg:80:")
+    assert base64.b64decode(frames[0]["data_base64"]).startswith(b"jpeg:100:")
 
 
 async def _append(collection: list[dict], payload: dict) -> None:

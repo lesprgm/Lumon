@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 import time
+import contextlib
 from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.streaming.stream_profile import (
+    ScreencastPreset,
+    StreamProfileConfig,
+    default_stream_profile,
+)
+
 
 FrameEmitter = Callable[[dict[str, Any]], Awaitable[None]]
-
-
-DEFAULT_CDP_EMIT_QUEUE_SIZE = int(os.getenv("LUMON_CDP_EMIT_QUEUE_SIZE", "5"))
-DEFAULT_CDP_MIN_FPS = float(os.getenv("LUMON_CDP_MIN_FPS", "12"))
-DEFAULT_POLL_INTERVAL_SECONDS = float(os.getenv("LUMON_POLL_INTERVAL_SECONDS", "0.1"))
-DEFAULT_CDP_MAX_WIDTH = int(os.getenv("LUMON_CDP_MAX_WIDTH", "1920"))
-DEFAULT_CDP_MAX_HEIGHT = int(os.getenv("LUMON_CDP_MAX_HEIGHT", "1080"))
 
 
 class ScreencastMonitor:
@@ -54,15 +53,18 @@ class ScreencastMonitor:
 
 
 class CDPScreencastStreamer:
-    PRESETS = (
-        {"quality": 92, "everyNthFrame": 1},
-        {"quality": 82, "everyNthFrame": 1},
-        {"quality": 70, "everyNthFrame": 1},
-    )
+    PRESETS = default_stream_profile().cdp_presets
 
-    def __init__(self, cdp_session: Any, emit_frame: FrameEmitter) -> None:
+    def __init__(
+        self,
+        cdp_session: Any,
+        emit_frame: FrameEmitter,
+        *,
+        profile_config: StreamProfileConfig | None = None,
+    ) -> None:
         self.cdp_session = cdp_session
         self.emit_frame = emit_frame
+        self.profile_config = profile_config or default_stream_profile()
         self.monitor = ScreencastMonitor()
         self._frame_seq = 0
         self._running = False
@@ -70,15 +72,24 @@ class CDPScreencastStreamer:
         self._health_task: asyncio.Task[None] | None = None
         self._emit_task: asyncio.Task[None] | None = None
         self._emit_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
-            maxsize=DEFAULT_CDP_EMIT_QUEUE_SIZE
+            maxsize=self.profile_config.cdp_emit_queue_size
         )
         self._needs_degrade = asyncio.Event()
         self._fallback_requested = asyncio.Event()
-        self._min_fps = DEFAULT_CDP_MIN_FPS
+        self._frame_emitted_event = asyncio.Event()
+        self._min_fps = self.profile_config.cdp_min_fps
+
+    @property
+    def presets(self) -> tuple[ScreencastPreset, ...]:
+        return self.profile_config.cdp_presets
 
     @property
     def fallback_requested(self) -> asyncio.Event:
         return self._fallback_requested
+
+    @property
+    def frame_emitted_event(self) -> asyncio.Event:
+        return self._frame_emitted_event
 
     async def start(self) -> None:
         if self._running:
@@ -112,15 +123,14 @@ class CDPScreencastStreamer:
 
     async def _start_screencast(self) -> None:
         self.monitor.mark_restart()
-        preset = self.PRESETS[self._preset_index]
-        await self.cdp_session.send(
-            "Page.startScreencast",
-            {
-                "format": "jpeg",
-                "quality": preset["quality"],
-                "everyNthFrame": preset["everyNthFrame"],
-            },
-        )
+        preset = self.presets[self._preset_index]
+        params = {
+            "format": preset.format,
+            "everyNthFrame": preset.every_nth_frame,
+        }
+        if preset.quality is not None:
+            params["quality"] = preset.quality
+        await self.cdp_session.send("Page.startScreencast", params)
 
     async def _restart_screencast(self) -> None:
         with contextlib.suppress(Exception):
@@ -128,7 +138,9 @@ class CDPScreencastStreamer:
         await self._start_screencast()
 
     def request_degrade(self) -> bool:
-        if self._preset_index + 1 >= len(self.PRESETS):
+        if not self.profile_config.allow_quality_degrade:
+            return False
+        if self._preset_index + 1 >= len(self.presets):
             return False
         self._preset_index += 1
         self._needs_degrade.set()
@@ -173,7 +185,7 @@ class CDPScreencastStreamer:
             "Page.screencastFrameAck", {"sessionId": params["sessionId"]}
         )
         payload = {
-            "mime_type": "image/jpeg",
+            "mime_type": f"image/{self.presets[self._preset_index].format}",
             "data_base64": params["data"],
             "frame_seq": self._frame_seq,
         }
@@ -188,6 +200,8 @@ class CDPScreencastStreamer:
             payload = await self._emit_queue.get()
             if payload is None:
                 continue
+            self._frame_emitted_event.set()
+            self._frame_emitted_event = asyncio.Event()
             await self.emit_frame(payload)
 
 
@@ -197,14 +211,16 @@ class ScreenshotPollStreamer:
         page: Any,
         emit_frame: FrameEmitter,
         *,
+        profile_config: StreamProfileConfig | None = None,
         interval_seconds: float | None = None,
     ) -> None:
         self.page = page
         self.emit_frame = emit_frame
+        self.profile_config = profile_config or default_stream_profile()
         self.interval_seconds = (
             interval_seconds
-            if interval_seconds is not None
-            else DEFAULT_POLL_INTERVAL_SECONDS
+            if interval_seconds is not None and interval_seconds > 0
+            else self.profile_config.screenshot_interval_seconds
         )
         self._task: asyncio.Task[None] | None = None
         self._running = False
@@ -214,6 +230,7 @@ class ScreenshotPollStreamer:
         if self._running:
             return
         self._running = True
+        self._frame_emitted_event = asyncio.Event()
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -223,20 +240,30 @@ class ScreenshotPollStreamer:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
 
+    @property
+    def frame_emitted_event(self) -> asyncio.Event:
+        return self._frame_emitted_event
+
     async def _run(self) -> None:
         while self._running:
             self._frame_seq += 1
-            data = await self.page.screenshot(type="jpeg", quality=80)
+            screenshot_kwargs: dict[str, Any] = {
+                "type": self.profile_config.screenshot_format,
+            }
+            if self.profile_config.screenshot_quality is not None:
+                screenshot_kwargs["quality"] = self.profile_config.screenshot_quality
+            data = await self.page.screenshot(**screenshot_kwargs)
+            if isinstance(data, str):
+                encoded = data
+            else:
+                encoded = base64.b64encode(data).decode("ascii")
+            self._frame_emitted_event.set()
+            self._frame_emitted_event = asyncio.Event()
             await self.emit_frame(
                 {
-                    "mime_type": "image/jpeg",
-                    "data_base64": data.decode("ascii")
-                    if isinstance(data, str)
-                    else base64.b64encode(data).decode("ascii"),
+                    "mime_type": f"image/{self.profile_config.screenshot_format}",
+                    "data_base64": encoded,
                     "frame_seq": self._frame_seq,
                 }
             )
             await asyncio.sleep(self.interval_seconds)
-
-
-import contextlib  # noqa: E402
