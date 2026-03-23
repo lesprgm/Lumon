@@ -1,0 +1,96 @@
+{
+  "source": "frontend/public/assets/lobster/success/generated_gemini31_raw",
+  "frame_count": 6,
+  "normalized_canvas": {
+    "width": 846,
+    "height": 1173
+  },
+  "cleanup": {
+    "background_removal": "border-connected near-white flood fill",
+    "target_canvas": [
+      846,
+      1173
+    ],
+    "anchor": "bottom_center"
+  },
+  "frames": [
+    {
+      "frame": "success_01",
+      "source": "frontend/public/assets/lobster/success/generated_gemini31_raw/success_00.png",
+      "cleaned_frame_path": "frontend/public/assets/lobster/success/cleaned_gemini31/success_01.png",
+      "published_frame_path": "frontend/public/assets/lobster/success/frames/success_01.png",
+      "alpha_bbox_from_raw": [
+        0,
+        0,
+        877,
+        1216
+      ]
+    },
+    {
+      "frame": "success_02",
+      "source": "frontend/public/assets/lobster/success/generated_gemini31_raw/success_01.png",
+      "cleaned_frame_path": "frontend/public/assets/lobster/success/cleaned_gemini31/success_02.png",
+      "published_frame_path": "frontend/public/assets/lobster/success/frames/success_02.png",
+      "alpha_bbox_from_raw": [
+        0,
+        0,
+        877,
+        1216
+      ]
+    },
+    {
+      "frame": "success_03",
+      "source": "frontend/public/assets/lobster/success/regen_candidates/success_03_b.png",
+      "cleaned_frame_path": "frontend/public/assets/lobster/success/cleaned_gemini31/success_03.png",
+      "published_frame_path": "frontend/public/assets/lobster/success/frames/success_03.png",
+      "alpha_bbox_from_raw": [
+        0,
+        0,
+        877,
+        1216
+      ],
+      "replacement_note": "selective regeneration candidate promoted"
+    },
+    {
+      "frame": "success_04",
+      "source": "frontend/public/assets/lobster/success/generated_gemini31_raw/success_03.png",
+      "cleaned_frame_path": "frontend/public/assets/lobster/success/cleaned_gemini31/success_04.png",
+      "published_frame_path": "frontend/public/assets/lobster/success/frames/success_04.png",
+      "alpha_bbox_from_raw": [
+        0,
+        1,
+        877,
+        1168
+      ]
+    },
+    {
+      "frame": "success_05",
+      "source": "frontend/public/assets/lobster/success/regen_candidates/success_05_b.png",
+      "cleaned_frame_path": "frontend/public/assets/lobster/success/cleaned_gemini31/success_05.png",
+      "published_frame_path": "frontend/public/assets/lobster/success/frames/success_05.png",
+      "alpha_bbox_from_raw": [
+        0,
+        0,
+        877,
+        1216
+      ],
+      "replacement_note": "selective regeneration candidate promoted"
+    },
+    {
+      "frame": "success_06",
+      "source": "frontend/public/assets/lobster/success/generated_gemini31_raw/success_05.png",
+      "cleaned_frame_path": "frontend/public/assets/lobster/success/cleaned_gemini31/success_06.png",
+      "published_frame_path": "frontend/public/assets/lobster/success/frames/success_06.png",
+      "alpha_bbox_from_raw": [
+        0,
+        0,
+        877,
+        1216
+      ]
+    }
+  ],
+  "selected_replacements": {
+    "success_03.png": "success_03_b.png",
+    "success_05.png": "success_05_b.png"
+  }
+}

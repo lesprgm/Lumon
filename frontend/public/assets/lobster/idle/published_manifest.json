@@ -1,0 +1,35 @@
+{
+  "source": "new lobster/cleaned/idle",
+  "frame_count": 5,
+  "normalized_canvas": {
+    "width": 846,
+    "height": 1173
+  },
+  "frames": [
+    {
+      "frame": "idle_01",
+      "source": "new lobster/cleaned/idle/idle_00.png",
+      "published_frame_path": "frontend/public/assets/lobster/idle/frames/idle_01.png"
+    },
+    {
+      "frame": "idle_02",
+      "source": "new lobster/cleaned/idle/idle_01.png",
+      "published_frame_path": "frontend/public/assets/lobster/idle/frames/idle_02.png"
+    },
+    {
+      "frame": "idle_03",
+      "source": "new lobster/cleaned/idle/idle_02.png",
+      "published_frame_path": "frontend/public/assets/lobster/idle/frames/idle_03.png"
+    },
+    {
+      "frame": "idle_04",
+      "source": "new lobster/cleaned/idle/idle_03.png",
+      "published_frame_path": "frontend/public/assets/lobster/idle/frames/idle_04.png"
+    },
+    {
+      "frame": "idle_05",
+      "source": "new lobster/cleaned/idle/idle_04.png",
+      "published_frame_path": "frontend/public/assets/lobster/idle/frames/idle_05.png"
+    }
+  ]
+}

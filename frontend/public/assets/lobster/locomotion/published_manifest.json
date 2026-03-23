@@ -1,0 +1,46 @@
+{
+  "source": "locomotion/final_candidates",
+  "frame_count": 6,
+  "normalized_canvas": {
+    "width": 1752,
+    "height": 2164
+  },
+  "final_crop": [
+    0,
+    268,
+    1752,
+    2432
+  ],
+  "frames": [
+    {
+      "frame": "locomotion_01",
+      "source": "locomotion/final_candidates/locomotion_00.png",
+      "published_frame_path": "frontend/public/assets/lobster/locomotion/frames/locomotion_01.png"
+    },
+    {
+      "frame": "locomotion_02",
+      "source": "locomotion/final_candidates/locomotion_01.png",
+      "published_frame_path": "frontend/public/assets/lobster/locomotion/frames/locomotion_02.png"
+    },
+    {
+      "frame": "locomotion_03",
+      "source": "locomotion/final_candidates/locomotion_02.png",
+      "published_frame_path": "frontend/public/assets/lobster/locomotion/frames/locomotion_03.png"
+    },
+    {
+      "frame": "locomotion_04",
+      "source": "locomotion/final_candidates/locomotion_03.png",
+      "published_frame_path": "frontend/public/assets/lobster/locomotion/frames/locomotion_04.png"
+    },
+    {
+      "frame": "locomotion_05",
+      "source": "locomotion/final_candidates/locomotion_04.png",
+      "published_frame_path": "frontend/public/assets/lobster/locomotion/frames/locomotion_05.png"
+    },
+    {
+      "frame": "locomotion_06",
+      "source": "locomotion/final_candidates/locomotion_05.png",
+      "published_frame_path": "frontend/public/assets/lobster/locomotion/frames/locomotion_06.png"
+    }
+  ]
+}

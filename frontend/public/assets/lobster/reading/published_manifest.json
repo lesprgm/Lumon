@@ -1,0 +1,46 @@
+{
+  "source": "reading/final_candidates",
+  "frame_count": 6,
+  "normalized_canvas": {
+    "width": 1752,
+    "height": 2432
+  },
+  "final_crop": [
+    0,
+    0,
+    1752,
+    2432
+  ],
+  "frames": [
+    {
+      "frame": "reading_01",
+      "source": "reading/final_candidates/reading_00.png",
+      "published_frame_path": "frontend/public/assets/lobster/reading/frames/reading_01.png"
+    },
+    {
+      "frame": "reading_02",
+      "source": "reading/final_candidates/reading_01.png",
+      "published_frame_path": "frontend/public/assets/lobster/reading/frames/reading_02.png"
+    },
+    {
+      "frame": "reading_03",
+      "source": "reading/final_candidates/reading_02.png",
+      "published_frame_path": "frontend/public/assets/lobster/reading/frames/reading_03.png"
+    },
+    {
+      "frame": "reading_04",
+      "source": "reading/final_candidates/reading_03.png",
+      "published_frame_path": "frontend/public/assets/lobster/reading/frames/reading_04.png"
+    },
+    {
+      "frame": "reading_05",
+      "source": "reading/final_candidates/reading_04.png",
+      "published_frame_path": "frontend/public/assets/lobster/reading/frames/reading_05.png"
+    },
+    {
+      "frame": "reading_06",
+      "source": "reading/final_candidates/reading_05.png",
+      "published_frame_path": "frontend/public/assets/lobster/reading/frames/reading_06.png"
+    }
+  ]
+}

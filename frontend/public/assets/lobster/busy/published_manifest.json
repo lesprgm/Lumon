@@ -1,0 +1,46 @@
+{
+  "source": "busy/final_candidates",
+  "frame_count": 6,
+  "normalized_canvas": {
+    "width": 1752,
+    "height": 2262
+  },
+  "final_crop": [
+    0,
+    170,
+    1752,
+    2432
+  ],
+  "frames": [
+    {
+      "frame": "busy_01",
+      "source": "busy/final_candidates/busy_00.png",
+      "published_frame_path": "frontend/public/assets/lobster/busy/frames/busy_01.png"
+    },
+    {
+      "frame": "busy_02",
+      "source": "busy/final_candidates/busy_01.png",
+      "published_frame_path": "frontend/public/assets/lobster/busy/frames/busy_02.png"
+    },
+    {
+      "frame": "busy_03",
+      "source": "busy/final_candidates/busy_02.png",
+      "published_frame_path": "frontend/public/assets/lobster/busy/frames/busy_03.png"
+    },
+    {
+      "frame": "busy_04",
+      "source": "busy/final_candidates/busy_03.png",
+      "published_frame_path": "frontend/public/assets/lobster/busy/frames/busy_04.png"
+    },
+    {
+      "frame": "busy_05",
+      "source": "busy/final_candidates/busy_04.png",
+      "published_frame_path": "frontend/public/assets/lobster/busy/frames/busy_05.png"
+    },
+    {
+      "frame": "busy_06",
+      "source": "busy/final_candidates/busy_05.png",
+      "published_frame_path": "frontend/public/assets/lobster/busy/frames/busy_06.png"
+    }
+  ]
+}

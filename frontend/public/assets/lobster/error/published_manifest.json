@@ -1,0 +1,46 @@
+{
+  "source": "error/final_candidates",
+  "frame_count": 6,
+  "normalized_canvas": {
+    "width": 1752,
+    "height": 2352
+  },
+  "final_crop": [
+    0,
+    68,
+    1752,
+    2420
+  ],
+  "frames": [
+    {
+      "frame": "error_01",
+      "source": "error/final_candidates/error_00.png",
+      "published_frame_path": "frontend/public/assets/lobster/error/frames/error_01.png"
+    },
+    {
+      "frame": "error_02",
+      "source": "error/final_candidates/error_01.png",
+      "published_frame_path": "frontend/public/assets/lobster/error/frames/error_02.png"
+    },
+    {
+      "frame": "error_03",
+      "source": "error/final_candidates/error_02.png",
+      "published_frame_path": "frontend/public/assets/lobster/error/frames/error_03.png"
+    },
+    {
+      "frame": "error_04",
+      "source": "error/final_candidates/error_03.png",
+      "published_frame_path": "frontend/public/assets/lobster/error/frames/error_04.png"
+    },
+    {
+      "frame": "error_05",
+      "source": "error/final_candidates/error_04.png",
+      "published_frame_path": "frontend/public/assets/lobster/error/frames/error_05.png"
+    },
+    {
+      "frame": "error_06",
+      "source": "error/final_candidates/error_05.png",
+      "published_frame_path": "frontend/public/assets/lobster/error/frames/error_06.png"
+    }
+  ]
+}
