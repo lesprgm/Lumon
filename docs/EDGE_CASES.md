@@ -189,7 +189,24 @@ Mitigation:
 - bridge runtime now forwards both `latest_frame_generation` and `latest_command_frame_generation`
 - command evidence checks use the command-scoped counter so `open`/`status` do not get stuck at `partial/frame_missing` while the page is visibly live
 
-### 20. Finalized artifact files are assumed to exist during a running session
+### 20. Rapid agent actions cause UI jitter and blank screens
+Status: covered
+
+What it is: When the agent executes fast back-to-back commands (e.g., `navigate` -> `inspect` -> `open`), the UI can flash rapidly, show blank screens between navigations, or display rapidly-changing captions that make the session feel chaotic and untrustworthy.
+
+Root causes addressed:
+1. **Blank screen between navigations**: The CDP screencast/WebRTC stream can lag behind rapid navigation, leaving the UI with no visual frame.
+2. **Rapid caption flashing**: Each micro-action (inspect, scroll, wait) overwrites the caption, making the text flicker on and off.
+3. **Sprite jitter**: The mascot snaps between micro-target coordinates, looking erratic.
+
+Fixes applied:
+1. **Frame Sync Gate** (`backend/app/browser/screencast.py`): Both `CDPScreencastStreamer` and `ScreenshotPollStreamer` now expose a `frame_emitted_event` — a fresh `asyncio.Event` that is set after every frame is emitted, then immediately cleared. `BrowserActionLayer` (`backend/app/browser/actions.py`) calls `_wait_for_frame()` after `navigate` and `click` actions. This guarantees the UI receives at least one visual keyframe before the agent fires the next command.
+
+2. **Frame Sync Hook** (`backend/app/adapters/playwright_native.py`): `PlaywrightNativeConnector` exposes `_get_frame_emitted_event()` which dynamically returns the current streamer's event. This is passed as `frame_sync` to `BrowserActionLayer` so the sync works even when the stream switches (e.g., on page adoption or stream degradation fallback).
+
+3. **Micro-Action Coalescing** (`frontend/src/overlay/engine/overlayEngine.ts`): The `applyEvent()` method now detects when a micro-action (`read`, `wait`, `scroll`) arrives within `TARGET_COALESCE_WINDOW_MS` (250ms) of the previous event. In that window, it updates the sprite position for fluid interpolation but **does not** reset the caption, action type, or target visuals. This prevents rapid caption flicker and lets the sprite smoothly curve to its final destination rather than stopping at intermediate micro-targets.
+
+### 21. Finalized artifact files are assumed to exist during a running session
 Status: covered in docs, partly covered in tooling
 
 Mitigation:

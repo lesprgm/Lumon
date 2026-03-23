@@ -4,7 +4,7 @@
 The backend is the session runtime, browser delegate entry point, and artifact writer.
 
 ## Main Entry
-`/Users/leslie/Documents/Lumon/backend/app/main.py`
+`backend/app/main.py`
 
 Key routes:
 - `GET /healthz`: liveness + protocol/runtime version
@@ -17,7 +17,7 @@ Key routes:
 ## SessionManager and SessionRuntime
 `SessionManager` creates and owns runtimes. `SessionRuntime` is the core state container.
 
-Main responsibilities in `/Users/leslie/Documents/Lumon/backend/app/session/manager.py`:
+Main responsibilities in `backend/app/session/manager.py`:
 - create/join sessions
 - enforce websocket token/origin checks
 - handle client messages (`start_task`, `attach_observer`, `ui_ready`, approval actions)
@@ -38,7 +38,7 @@ Important runtime state fields:
 - artifact recorder
 
 ## Connector Model
-Connectors are selected through `/Users/leslie/Documents/Lumon/backend/app/adapters/registry.py`.
+Connectors are selected through `backend/app/adapters/registry.py`.
 
 Two important connectors:
 - `OpenCodeConnector`
@@ -70,7 +70,7 @@ Responsibilities:
 - enforce idempotency, busy locking, stale target rejection, and approval blocking
 
 ## Browser Command Path
-Models live in `/Users/leslie/Documents/Lumon/backend/app/protocol/models.py`.
+Models live in `backend/app/protocol/models.py`.
 
 Main types:
 - `BrowserCommandRequest`
@@ -97,7 +97,7 @@ Design constraints:
 - risky actions should block instead of pretending to succeed
 
 ## Artifact Recorder
-`/Users/leslie/Documents/Lumon/backend/app/session/artifacts.py`
+`backend/app/session/artifacts.py`
 
 Responsibilities:
 - record event log
@@ -133,9 +133,9 @@ Current metric fields include:
 The backend validates both incoming and outgoing envelopes.
 
 Relevant files:
-- `/Users/leslie/Documents/Lumon/backend/app/protocol/validation.py`
-- `/Users/leslie/Documents/Lumon/backend/app/protocol/models.py`
-- `/Users/leslie/Documents/Lumon/backend/app/protocol/enums.py`
+- `backend/app/protocol/validation.py`
+- `backend/app/protocol/models.py`
+- `backend/app/protocol/enums.py`
 
 This matters because Lumon's frontend and artifact pipeline assume the normalized contract is trustworthy.
 

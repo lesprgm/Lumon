@@ -5,10 +5,10 @@ This document explains what Lumon writes to disk, when those files appear, and h
 
 ## Artifact Root
 Per-session artifacts live under:
-- `/Users/leslie/Documents/Lumon/output/sessions/<session_id>/`
+- `output/sessions/<session_id>/`
 
 Metrics rollups live under:
-- `/Users/leslie/Documents/Lumon/output/metrics/sessions.ndjson`
+- `output/metrics/sessions.ndjson`
 
 ## Session Files
 ### Always conceptually part of the artifact bundle
@@ -28,7 +28,7 @@ That means:
 
 ## Writer
 File:
-- `/Users/leslie/Documents/Lumon/backend/app/session/artifacts.py`
+- `backend/app/session/artifacts.py`
 
 `SessionArtifactRecorder` owns:
 - browser context
@@ -110,7 +110,7 @@ Current naming pattern:
 
 ## Live Review Endpoint
 Backend route:
-- `/Users/leslie/Documents/Lumon/backend/app/main.py`
+- `backend/app/main.py`
 - `GET /api/session-artifacts/{session_id}`
 
 Behavior:
@@ -122,10 +122,10 @@ This is why review mode can still work during or immediately after a live sessio
 
 ## Review Mode Construction
 Frontend files:
-- `/Users/leslie/Documents/Lumon/frontend/src/lib/reviewMode.ts`
-- `/Users/leslie/Documents/Lumon/frontend/src/App.tsx`
-- `/Users/leslie/Documents/Lumon/frontend/src/components/TimelinePanel.tsx`
-- `/Users/leslie/Documents/Lumon/frontend/src/components/LiveStage.tsx`
+- `frontend/src/lib/reviewMode.ts`
+- `frontend/src/App.tsx`
+- `frontend/src/components/TimelinePanel.tsx`
+- `frontend/src/components/LiveStage.tsx`
 
 Review mode derives:
 - page transitions

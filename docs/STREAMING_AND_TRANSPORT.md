@@ -33,7 +33,7 @@ flowchart LR
 ## Backend Pieces
 ### `PlaywrightNativeConnector`
 File:
-- `/Users/leslie/Documents/Lumon/backend/app/adapters/playwright_native.py`
+- `backend/app/adapters/playwright_native.py`
 
 Responsibilities:
 - own the delegated browser runtime
@@ -50,7 +50,7 @@ The bridge runtime used by the OpenCode connector must forward **both** counters
 
 ### `SessionRuntime`
 File:
-- `/Users/leslie/Documents/Lumon/backend/app/session/manager.py`
+- `backend/app/session/manager.py`
 
 Responsibilities:
 - keep the latest websocket frame payload
@@ -65,7 +65,7 @@ Relevant behavior:
 
 ### `WebRTCSession`
 File:
-- `/Users/leslie/Documents/Lumon/backend/app/streaming/webrtc.py`
+- `backend/app/streaming/webrtc.py`
 
 Responsibilities:
 - accept decoded image frames
@@ -80,7 +80,7 @@ Current behavior:
 ## Frontend Pieces
 ### `WebRTCClient`
 File:
-- `/Users/leslie/Documents/Lumon/frontend/src/lib/webrtcClient.ts`
+- `frontend/src/lib/webrtcClient.ts`
 
 Responsibilities:
 - request a WebRTC offer over the websocket session
@@ -90,7 +90,7 @@ Responsibilities:
 
 ### `SessionSocket`
 File:
-- `/Users/leslie/Documents/Lumon/frontend/src/lib/sessionSocket.ts`
+- `frontend/src/lib/sessionSocket.ts`
 
 Responsibilities:
 - keep the websocket session alive
@@ -135,7 +135,7 @@ A command can succeed without generating a new review keyframe immediately. A li
 ## Runtime Modes
 ### Primary local runtime
 Current startup script:
-- `/Users/leslie/Documents/Lumon/scripts/start_demo_frontend.sh`
+- `scripts/start_demo_frontend.sh`
 
 Default behavior today:
 - use `vite preview` on `127.0.0.1:5173`
@@ -152,3 +152,10 @@ This is intentional. Detached dev servers were too fragile for the plugin-first 
 - WebRTC is the default live path, but it still rides on image-frame transport rather than a native Chromium media pipeline.
 - Cold-start latency still comes from three places: backend, frontend, and delegated browser startup.
 - Multi-tab browser flows still collapse to one active foreground page for live observation.
+
+## Frame Sync Gate
+When the agent executes rapid back-to-back commands, the UI must receive at least one visual frame after each major action before the next action fires. This is achieved via a frame sync gate:
+
+Both `CDPScreencastStreamer` and `ScreenshotPollStreamer` expose a `frame_emitted_event` — a fresh `asyncio.Event` that is set after every frame is emitted and immediately cleared to create a new gate. After every `navigate` and `click` action, `BrowserActionLayer` awaits this event (with a 2-second timeout). If no frame arrives in time, the agent proceeds anyway — this is non-blocking and graceful.
+
+This prevents the "blank white screen" problem: the agent can navigate 4 pages in 0.5 seconds, but the UI always has at least one verified frame attached to each step before the agent races ahead.

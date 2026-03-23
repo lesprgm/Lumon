@@ -53,7 +53,7 @@ Live state and review state are deliberately separate:
 - renders milestone keyframes, command history, interventions, and summary metrics
 
 ## Backend Entry Points
-Primary API surface in `/Users/leslie/Documents/Lumon/backend/app/main.py`:
+Primary API surface in `backend/app/main.py`:
 - `GET /healthz`
 - `POST /api/local/observe/opencode`
 - `POST /api/local/opencode/browser/command`
@@ -116,3 +116,19 @@ Important constraints:
 - observer event noise can still contaminate the user experience if not kept strictly scoped away from the main browser-command path
 - browser delegation is local-only and not designed for remote orchestration
 - live transport is smoother than snapshot-only fallback, but still uses image-frame transport rather than a native Chromium media pipeline
+
+## Frame Synchronization
+When the agent executes rapid back-to-back commands, the UI must remain stable and legible. Lumon solves this with two complementary mechanisms:
+
+### Backend: Frame Sync Gate
+After every `navigate` or `click` action, `BrowserActionLayer` waits for the screencast stream to emit at least one frame before proceeding to the next command. This is implemented via an `asyncio.Event` (`frame_emitted_event`) on both `CDPScreencastStreamer` and `ScreenshotPollStreamer`. The event is set after each frame is emitted and immediately cleared, creating a fresh gate for the next action.
+
+This prevents the "blank white screen" problem where the agent has already navigated to a new page but the WebRTC stream has not yet delivered a frame to the UI.
+
+### Frontend: Micro-Action Coalescing
+The OverlayEngine (`frontend/src/overlay/engine/overlayEngine.ts`) coalesces rapid micro-actions (`read`, `wait`, `scroll`) that arrive within 250ms of each other. During the coalesce window, the engine:
+- Updates the sprite's target position for smooth interpolation (the sprite curves fluidly to the final destination)
+- Does **not** reset the caption or action type (preventing text flicker)
+- Does **not** reset the target visual markers
+
+This gives the user a calm, readable UI even when the agent is executing complex multi-step plans at full speed, while the Timeline panel continues to log every micro-action for full auditability.

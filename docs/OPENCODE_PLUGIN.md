@@ -4,8 +4,8 @@
 The plugin is the primary Lumon integration path.
 
 Files:
-- `/Users/leslie/Documents/Lumon/.opencode/plugins/lumon.js`
-- `/Users/leslie/Documents/Lumon/.opencode/lib/lumonPluginCore.js`
+- `.opencode/plugins/lumon.js`
+- `.opencode/lib/lumonPluginCore.js`
 
 ## Main Responsibilities
 - load config from environment
