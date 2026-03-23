@@ -1,6 +1,7 @@
 export type AdapterId = "playwright_native" | "opencode";
 export type WebBridgeId = "playwright_native";
 export type WebModeId = "observe_only" | "delegate_playwright";
+export type StreamProfile = "demo_local";
 export type SpriteFamily = "lobster" | "dog";
 export type SessionState =
   | "idle"
@@ -55,6 +56,13 @@ export interface SessionBootstrapPayload {
   protocol_version: string;
 }
 
+export interface UiReadyPayload {
+  ready: true;
+  runtime_version?: string | null;
+  supports_ui_telemetry?: boolean | null;
+  supports_ui_ready_handshake?: boolean | null;
+}
+
 export interface SessionStatePayload {
   session_id: string;
   adapter_id: AdapterId;
@@ -96,6 +104,23 @@ export interface WebRTCIcePayload {
 
 export interface WebRTCReadyPayload {
   ready: true;
+}
+
+export interface UiTelemetryPayload {
+  event:
+    | "auto_start_completed"
+    | "open_requested"
+    | "open_suppressed"
+    | "open_completed"
+    | "open_failed"
+    | "meaningful_frame_visible"
+    | "intervention_visible"
+    | "clarity_ready"
+    | "sprite_visible"
+    | "video_quality_sample";
+  source?: "frontend" | "plugin";
+  timestamp?: string | null;
+  meta?: Record<string, unknown>;
 }
 
 export interface Cursor {
@@ -229,8 +254,9 @@ export type ServerPayloadMap = {
 
 export type ClientPayloadMap = {
   start_task: { task_text: string; demo_mode: boolean; adapter_id: AdapterId; web_mode?: WebModeId | null; web_bridge?: WebBridgeId | null };
-  ui_ready: { ready: true };
-  webrtc_request: Record<string, never>;
+  ui_ready: UiReadyPayload;
+  ui_telemetry: UiTelemetryPayload;
+  webrtc_request: { stream_profile?: StreamProfile | null };
   webrtc_answer: WebRTCAnswerPayload;
   webrtc_ice: WebRTCIcePayload;
   accept_bridge: Record<string, never>;
@@ -294,19 +320,46 @@ export interface SessionMetrics {
   attach_requested_at?: string | null;
   attached_at?: string | null;
   first_browser_event_at?: string | null;
+  first_frame_at?: string | null;
   ui_open_requested_at?: string | null;
   ui_ready_at?: string | null;
+  first_meaningful_frame_at?: string | null;
+  intervention_visible_at?: string | null;
+  clarity_ready_at?: string | null;
+  first_sprite_visible_at?: string | null;
+  startup_latency_ms?: number | null;
   attach_latency_ms?: number | null;
+  first_frame_latency_ms?: number | null;
   ui_open_latency_ms?: number | null;
+  meaningful_frame_latency_ms?: number | null;
+  browser_to_meaningful_frame_latency_ms?: number | null;
+  intervention_latency_ms?: number | null;
+  clarity_latency_ms?: number | null;
+  sprite_after_frame_latency_ms?: number | null;
   browser_episode_count: number;
   intervention_count: number;
   reconnect_count: number;
   duplicate_attach_prevented: number;
+  auto_start_count?: number;
+  open_attempt_count?: number;
+  open_suppressed_count?: number;
+  open_completed_count?: number;
+  open_failed_count?: number;
+  false_open_count?: number;
+  noisy_open_prevented_count?: number;
   browser_command_count?: number;
   verified_browser_action_count?: number;
   browser_blocked_count?: number;
   browser_partial_count?: number;
   stale_target_count?: number;
+  video_quality_sample_count?: number;
+  peak_video_width?: number | null;
+  peak_video_height?: number | null;
+  peak_video_fps?: number | null;
+  latest_video_fps?: number | null;
+  clarity_within_2s?: boolean | null;
+  open_reason_counts?: Record<string, number>;
+  open_suppression_reason_counts?: Record<string, number>;
   session_completed: boolean;
   artifact_written: boolean;
 }

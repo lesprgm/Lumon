@@ -1,4 +1,9 @@
-import type { AnyServerEnvelope, WebRTCIcePayload, WebRTCOfferPayload } from "../protocol/types";
+import type {
+  AnyServerEnvelope,
+  ClientPayloadMap,
+  WebRTCIcePayload,
+  WebRTCOfferPayload,
+} from "../protocol/types";
 
 export type WebRTCStatus = "idle" | "connecting" | "connected" | "disconnected" | "failed" | "closed";
 
@@ -21,8 +26,8 @@ export class WebRTCClient {
   private reconnectAttempts = 0;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private disconnectTimeout: ReturnType<typeof setTimeout> | null = null;
-  private lastOfferPayload: WebRTCOfferPayload | null = null;
   private isDisposed = false;
+  private offerRequestPayload: ClientPayloadMap["webrtc_request"] = {};
 
   constructor(sendMessage: SendMessage, onStatus: StatusHandler, onStream: StreamHandler) {
     this.sendMessage = sendMessage;
@@ -30,8 +35,13 @@ export class WebRTCClient {
     this.onStream = onStream;
   }
 
-  requestOffer(): void {
-    this.sendMessage({ type: "webrtc_request", payload: {} });
+  setOfferRequestPayload(payload: ClientPayloadMap["webrtc_request"]): void {
+    this.offerRequestPayload = payload;
+  }
+
+  requestOffer(payload: ClientPayloadMap["webrtc_request"] = this.offerRequestPayload): void {
+    this.offerRequestPayload = payload;
+    this.sendMessage({ type: "webrtc_request", payload });
   }
 
   handleServerMessage(message: AnyServerEnvelope): void {
@@ -77,8 +87,8 @@ export class WebRTCClient {
     this.setStatus("disconnected");
 
     this.reconnectTimeout = setTimeout(() => {
-      if (this.lastOfferPayload && !this.isDisposed) {
-        void this.acceptOffer(this.lastOfferPayload);
+      if (!this.isDisposed) {
+        this.requestOffer();
       }
     }, RECONNECT_DELAY_MS);
   }
@@ -89,7 +99,6 @@ export class WebRTCClient {
     }
 
     this.setStatus("connecting");
-    this.lastOfferPayload = payload;
 
     if (this.peer) {
       this.disposePeer("closed");

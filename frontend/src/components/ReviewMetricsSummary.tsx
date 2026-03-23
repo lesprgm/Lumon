@@ -9,7 +9,7 @@ export function ReviewMetricsSummary({ metrics }: { metrics: SessionMetrics }) {
       <div className="review-metrics-header">
         <div>
           <h3>Local alpha summary</h3>
-          <p>Useful for tuning attach, open, and intervention behavior during testing.</p>
+          <p>Track trust, clarity, latency, sprite timing, and live video quality across test runs.</p>
         </div>
       </div>
       <div className="review-metrics-grid">

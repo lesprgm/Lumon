@@ -12,6 +12,7 @@ import {
   getBackendOrigin,
   sessionBootstrapFromUrl,
 } from "./lib/sessionBootstrap";
+import { buildWebRTCRequestPayload, normalizeStreamProfile } from "./lib/streamProfile";
 import { readStoredSpriteFamily, writeStoredSpriteFamily } from "./lib/spriteSelection";
 import {
   buildReviewStepSummary,
@@ -25,6 +26,7 @@ import {
 } from "./lib/reviewMode";
 import { resolveReviewKeyframePath } from "./lib/reviewKeyframes";
 import { SessionSocket } from "./lib/sessionSocket";
+import { LUMON_FRONTEND_FEATURES, LUMON_FRONTEND_RUNTIME_VERSION } from "./runtimeInfo";
 import { WebRTCClient, type WebRTCStatus } from "./lib/webrtcClient";
 import { OverlayEngine, type SceneSnapshot, resolveHotspotFromEvent, spriteTargetFromHotspot } from "./overlay/engine/overlayEngine";
 import { getSpriteSet, preloadSpriteFrames, SpritePlayer, type LumonActionType, type SpriteFamily } from "./overlay/sprites";
@@ -34,8 +36,11 @@ import type {
   AnyClientEnvelope,
   AnyServerEnvelope,
   ApprovalRequiredPayload,
+  BrowserContextPayload,
   BridgeOfferPayload,
+  InteractionMode,
   SessionArtifactResponse,
+  UiTelemetryPayload,
 } from "./protocol/types";
 import type { ActiveIntervention, SessionStoreState } from "./store/sessionStore";
 import { initialSessionStoreState, sessionStoreReducer } from "./store/sessionStore";
@@ -43,6 +48,37 @@ import { initialSessionStoreState, sessionStoreReducer } from "./store/sessionSt
 // Replay should be explicit-only; live websocket mode is the default user path.
 const REPLAY_MODE = import.meta.env.VITE_LUMON_REPLAY === "true";
 const WEBRTC_ENABLED = import.meta.env.VITE_LUMON_WEBRTC !== "false";
+const REVIEW_PLAYBACK_BASE_INTERVAL_MS = 1400;
+const REVIEW_RETURN_URL_KEY = "lumon.review.return_url";
+
+function buildReviewRunUrl(
+  sessionId: string,
+  locationLike: Pick<Location, "pathname" | "hash"> = window.location,
+): string {
+  const reviewParams = new URLSearchParams({ review_session: sessionId });
+  const suffix = locationLike.hash || "";
+  return `${locationLike.pathname}?${reviewParams.toString()}${suffix}`;
+}
+
+function buildLiveRunUrl(locationLike: Pick<Location, "pathname" | "hash"> = window.location): string {
+  return `${locationLike.pathname}${locationLike.hash || ""}`;
+}
+
+function rememberReviewReturnUrl(value: string): void {
+  try {
+    window.sessionStorage.setItem(REVIEW_RETURN_URL_KEY, value);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function readReviewReturnUrl(): string | null {
+  try {
+    return window.sessionStorage.getItem(REVIEW_RETURN_URL_KEY);
+  } catch {
+    return null;
+  }
+}
 
 function buildPreviewState(search: string): {
   activeIntervention: ActiveIntervention | null;
@@ -157,6 +193,23 @@ function buildPreviewState(search: string): {
   };
 }
 
+function buildManualControlIntervention(browserContext: BrowserContextPayload | null): ActiveIntervention {
+  return {
+    interventionId: `manual_${browserContext?.session_id ?? "active"}`,
+    kind: "manual_control",
+    headline: "You are in control",
+    reasonText: "The agent is paused until you return control.",
+    sourceUrl: browserContext?.url ?? null,
+    targetSummary: browserContext?.title ?? null,
+    recommendedAction: "return_control",
+    summaryText: "Manual control is active.",
+    intent: "Take over the page until you are ready to return control.",
+    checkpointId: null,
+    sourceEventId: null,
+    riskReason: null,
+  };
+}
+
 function toSpriteActionType(actionType: ActionType): ActionType {
   if (actionType === "spawn_subagent") return "wait";
   if (actionType === "subagent_result") return "complete";
@@ -195,6 +248,16 @@ function buildReviewSnapshot(
   const spriteSet = getSpriteSet(spriteFamily);
   const spritePlayer = new SpritePlayer(spriteSet.manifest, spriteSet.assetBasePath);
   const activeAgentEvent = selectedEvent;
+  const isTerminalReviewState = ["completed", "failed", "stopped"].includes(response.artifact.status);
+  const terminalCaption =
+    response.artifact.summary_text ??
+    (response.artifact.status === "completed"
+      ? "Done."
+      : response.artifact.status === "stopped"
+        ? "Stopped."
+        : response.artifact.status === "failed"
+          ? "Something went wrong."
+          : null);
   const hotspot = activeAgentEvent ? resolveHotspotFromEvent(activeAgentEvent) : null;
   const spriteTarget = activeAgentEvent ? spriteTargetFromHotspot(activeAgentEvent, hotspot) : null;
   const keyframePath = resolveReviewKeyframePath(response, selectedKey, selectedEvent, selectedIntervention);
@@ -211,6 +274,7 @@ function buildReviewSnapshot(
     mainActionType: activeAgentEvent?.action_type ?? null,
     caption:
       selectedIntervention?.headline ??
+      (isTerminalReviewState ? terminalCaption : null) ??
       activeAgentEvent?.summary_text ??
       response.artifact.summary_text ??
       "Reviewing this run",
@@ -231,6 +295,7 @@ function buildReviewSnapshot(
     targetPoint: hotspot,
     targetRect: activeAgentEvent?.target_rect ?? null,
     typing: activeAgentEvent?.action_type === "type",
+    fallbackMode: false,
   };
 }
 
@@ -238,6 +303,7 @@ export default function App() {
   const [state, dispatch] = useReducer(sessionStoreReducer, initialSessionStoreState);
   const [leftRailCollapsed, setLeftRailCollapsed] = useState(true);
   const [spriteFamily, setSpriteFamily] = useState<SpriteFamily>(() => readStoredSpriteFamily());
+  const [isNavigating, setIsNavigating] = useState(false);
   const [snapshot, setSnapshot] = useState<SceneSnapshot>({
     frameSrc: null,
     stageReady: false,
@@ -250,12 +316,17 @@ export default function App() {
     targetPoint: null,
     targetRect: null,
     typing: false,
+    fallbackMode: false,
   });
   const [reviewData, setReviewData] = useState<SessionArtifactResponse | null>(null);
   const [reviewSelection, setReviewSelection] = useState<ReviewSelectionKey>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewMetricsVisible, setReviewMetricsVisible] = useState(false);
+  const [reviewPlaybackActive, setReviewPlaybackActive] = useState(false);
+  const [reviewPlaybackSpeed, setReviewPlaybackSpeed] = useState<1 | 2>(1);
+  const [localInteractionModeOverride, setLocalInteractionModeOverride] = useState<InteractionMode | null>(null);
+  const [localActiveInterventionOverride, setLocalActiveInterventionOverride] = useState<ActiveIntervention | null>(null);
   const [webrtcStream, setWebrtcStream] = useState<MediaStream | null>(null);
   const [webrtcStatus, setWebrtcStatus] = useState<WebRTCStatus>("idle");
   const [webrtcRetryNonce, setWebrtcRetryNonce] = useState(0);
@@ -269,6 +340,14 @@ export default function App() {
   const uiReadySessionRef = useRef<string | null>(null);
   const searchParams = useMemo(() => new URLSearchParams(window.location.search), []);
   const reviewSessionId = searchParams.get("review_session");
+  const streamProfile = useMemo(
+    () => normalizeStreamProfile(searchParams.get("stream_profile")),
+    [searchParams],
+  );
+  const webrtcRequestPayload = useMemo(
+    () => buildWebRTCRequestPayload(streamProfile),
+    [streamProfile],
+  );
   const backendOrigin = useMemo(() => getBackendOrigin(), []);
   const isReviewMode = Boolean(reviewSessionId);
   const spriteSet = useMemo(() => getSpriteSet(spriteFamily), [spriteFamily]);
@@ -283,11 +362,68 @@ export default function App() {
     engineRef.current?.setSpriteSet(spriteSet);
   }, [spriteFamily, spriteSet]);
 
+  const [fallbackModeDebounced, setFallbackModeDebounced] = useState(false);
+  const fallbackEntryTimeRef = useRef<number>(0);
+  const fallbackTimeoutRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (isReviewMode) {
+      return;
+    }
+    const showVideo = Boolean(webrtcStream) && webrtcStatus !== "failed" && webrtcStatus !== "disconnected" && webrtcStatus !== "closed";
+    const hasVisibleBrowserTarget =
+      Boolean(state.browserContext?.url) &&
+      state.browserContext?.url !== "about:blank" &&
+      state.browserContext?.domain !== "unknown";
+    
+    const supportsFrames = state.session?.capabilities?.supports_frames ?? Boolean(snapshot.frameSrc);
+    
+    const isFallbackRaw = !showVideo && !snapshot.frameSrc && supportsFrames && hasVisibleBrowserTarget;
+
+    if (fallbackTimeoutRef.current) {
+      window.clearTimeout(fallbackTimeoutRef.current);
+    }
+
+    if (isFallbackRaw && !fallbackModeDebounced) {
+      // Entering fallback mode: debounce by 400ms to avoid flicker on brief drops
+      fallbackTimeoutRef.current = window.setTimeout(() => {
+        fallbackEntryTimeRef.current = Date.now();
+        setFallbackModeDebounced(true);
+      }, 400);
+    } else if (!isFallbackRaw && fallbackModeDebounced) {
+      // Exiting fallback mode: ensure we stay in it for at least 1500ms for stability
+      const timeInFallback = Date.now() - fallbackEntryTimeRef.current;
+      const remainingHoldTime = Math.max(0, 1500 - timeInFallback);
+      
+      fallbackTimeoutRef.current = window.setTimeout(() => {
+        setFallbackModeDebounced(false);
+      }, remainingHoldTime);
+    }
+  }, [isReviewMode, webrtcStream, webrtcStatus, state.browserContext, state.session?.capabilities?.supports_frames, snapshot.frameSrc, fallbackModeDebounced]);
+
+  useEffect(() => {
+    engineRef.current?.setFallbackMode(fallbackModeDebounced);
+  }, [fallbackModeDebounced]);
+
+  useEffect(() => {
+    if (state.browserContext?.domain) {
+      setIsNavigating(true);
+      const timer = window.setTimeout(() => setIsNavigating(false), 1500);
+      return () => window.clearTimeout(timer);
+    }
+  }, [state.browserContext?.domain]);
+
   useEffect(() => {
     if (isReviewMode) {
       return;
     }
     return engineRef.current!.subscribe(setSnapshot);
+  }, [isReviewMode]);
+
+  useEffect(() => {
+    if (isReviewMode) {
+      setLeftRailCollapsed(false);
+    }
   }, [isReviewMode]);
 
   useEffect(() => {
@@ -394,7 +530,15 @@ export default function App() {
       return;
     }
     uiReadySessionRef.current = state.session.session_id;
-    socketRef.current?.send({ type: "ui_ready", payload: { ready: true } });
+    socketRef.current?.send({
+      type: "ui_ready",
+      payload: {
+        ready: true,
+        runtime_version: LUMON_FRONTEND_RUNTIME_VERSION,
+        supports_ui_telemetry: LUMON_FRONTEND_FEATURES.uiTelemetry,
+        supports_ui_ready_handshake: LUMON_FRONTEND_FEATURES.uiReadyHandshake,
+      },
+    });
   }, [isReviewMode, state.connectionState, state.session?.session_id]);
 
   useEffect(() => {
@@ -408,6 +552,27 @@ export default function App() {
     engineRef.current?.reset();
     dispatch({ type: "live_reset" });
   }, [isReviewMode, state.connectionState]);
+
+  useEffect(() => {
+    setLocalInteractionModeOverride(null);
+    setLocalActiveInterventionOverride(null);
+  }, [isReviewMode, state.session?.session_id]);
+
+  useEffect(() => {
+    if (previewState.interactionModeOverride || !localInteractionModeOverride) {
+      return;
+    }
+    const serverInteractionMode = state.session?.interaction_mode ?? null;
+    if (localInteractionModeOverride === "takeover" && serverInteractionMode === "takeover") {
+      setLocalInteractionModeOverride(null);
+      setLocalActiveInterventionOverride(null);
+      return;
+    }
+    if (localInteractionModeOverride === "watch" && serverInteractionMode !== "takeover") {
+      setLocalInteractionModeOverride(null);
+      setLocalActiveInterventionOverride(null);
+    }
+  }, [localInteractionModeOverride, previewState.interactionModeOverride, state.session?.interaction_mode]);
 
   const handleServerMessage = (message: AnyServerEnvelope) => {
     dispatch({ type: "server_message", payload: message });
@@ -453,8 +618,33 @@ export default function App() {
     if (message.type === "reject") {
       dispatch({ type: "resolve_intervention_local", payload: { resolution: "denied" } });
     }
+    if (message.type === "start_takeover") {
+      setLocalInteractionModeOverride("takeover");
+      setLocalActiveInterventionOverride(buildManualControlIntervention(state.browserContext));
+      dispatch({ type: "resolve_intervention_local", payload: { resolution: "taken_over" } });
+    }
+    if (message.type === "end_takeover") {
+      setLocalInteractionModeOverride("watch");
+      setLocalActiveInterventionOverride(null);
+      dispatch({ type: "resolve_intervention_local", payload: { resolution: "taken_over" } });
+    }
     socketRef.current?.send(message);
   };
+
+  const sendUiTelemetry = useCallback((payload: UiTelemetryPayload) => {
+    if (REPLAY_MODE || isReviewMode || state.connectionState !== "connected") {
+      return;
+    }
+    socketRef.current?.send({
+      type: "ui_telemetry",
+      payload: {
+        source: "frontend",
+        timestamp: new Date().toISOString(),
+        meta: {},
+        ...payload,
+      },
+    });
+  }, [isReviewMode, state.connectionState]);
 
   useEffect(() => {
     if (!WEBRTC_ENABLED || REPLAY_MODE || isReviewMode) {
@@ -492,13 +682,14 @@ export default function App() {
         (stream) => setWebrtcStream(stream),
       );
     }
+    webrtcRef.current.setOfferRequestPayload(webrtcRequestPayload);
     if (webrtcSessionRef.current === state.session.session_id) {
       return;
     }
     webrtcSessionRef.current = state.session.session_id;
     setWebrtcStatus("connecting");
-    webrtcRef.current.requestOffer();
-  }, [isReviewMode, state.connectionState, state.session?.adapter_id, state.session?.capabilities?.supports_frames, state.session?.session_id, state.session?.web_bridge, webrtcRetryNonce]);
+    webrtcRef.current.requestOffer(webrtcRequestPayload);
+  }, [isReviewMode, state.connectionState, state.session?.adapter_id, state.session?.capabilities?.supports_frames, state.session?.session_id, state.session?.web_bridge, webrtcRequestPayload, webrtcRetryNonce]);
 
   useEffect(() => {
     if (REPLAY_MODE || isReviewMode) {
@@ -511,7 +702,7 @@ export default function App() {
       webrtcRef.current?.close();
       webrtcSessionRef.current = null;
       setWebrtcRetryNonce((value) => value + 1);
-    }, 4000);
+    }, 10000);
     return () => window.clearTimeout(timeoutId);
   }, [isReviewMode, webrtcStatus, webrtcStream]);
 
@@ -533,6 +724,45 @@ export default function App() {
     [reviewData, reviewSelectionDetails],
   );
   const reviewBrowserContext = reviewSelectionDetails?.browserContext ?? reviewData?.artifact.browser_context ?? null;
+  const completedSessionId = useMemo(() => {
+    if (isReviewMode) {
+      return null;
+    }
+    if (state.taskResult?.session_id) {
+      return state.taskResult.session_id;
+    }
+    if (state.session && ["completed", "failed", "stopped"].includes(state.session.state)) {
+      return state.session.session_id;
+    }
+    return null;
+  }, [isReviewMode, state.session, state.taskResult?.session_id]);
+  const reviewActionLabel = isReviewMode ? "Exit review" : completedSessionId ? "Review run" : null;
+
+  useEffect(() => {
+    if (!isReviewMode) {
+      setReviewPlaybackActive(false);
+      setReviewPlaybackSpeed(1);
+    }
+  }, [isReviewMode]);
+
+  useEffect(() => {
+    if (!isReviewMode || !reviewPlaybackActive || reviewSteps.length <= 1 || !reviewSelectionDetails) {
+      return;
+    }
+    if (reviewSelectionDetails.selectedIndex >= reviewSteps.length - 1) {
+      setReviewPlaybackActive(false);
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      const nextStep = reviewSteps[reviewSelectionDetails.selectedIndex + 1] ?? null;
+      if (!nextStep) {
+        setReviewPlaybackActive(false);
+        return;
+      }
+      setReviewSelection(nextStep.key);
+    }, Math.round(REVIEW_PLAYBACK_BASE_INTERVAL_MS / reviewPlaybackSpeed));
+    return () => window.clearTimeout(timeoutId);
+  }, [isReviewMode, reviewPlaybackActive, reviewPlaybackSpeed, reviewSelectionDetails, reviewSteps]);
 
   const renderedSnapshot = useMemo(() => {
     if (!isReviewMode || !reviewData || !reviewSelectionDetails) {
@@ -573,7 +803,7 @@ export default function App() {
         interaction_mode: "watch",
         active_checkpoint_id: null,
         task_text: reviewData.artifact.task_text,
-        viewport: { width: 1280, height: 800 },
+        viewport: { width: 1920, height: 1080 },
         capabilities: {
           supports_pause: false,
           supports_approval: false,
@@ -614,34 +844,96 @@ export default function App() {
     };
   }, [isReviewMode, previewState.activeIntervention, reviewBrowserContext, reviewData, state]);
 
+  const effectiveInteractionMode =
+    previewState.interactionModeOverride ??
+    localInteractionModeOverride ??
+    sessionLikeState.session?.interaction_mode ??
+    "watch";
+  const effectiveActiveIntervention =
+    previewState.activeIntervention ??
+    localActiveInterventionOverride ??
+    sessionLikeState.activeIntervention;
+  const renderedSessionLikeState = useMemo<SessionStoreState>(() => {
+    if (!sessionLikeState.session) {
+      return {
+        ...sessionLikeState,
+        activeIntervention: effectiveActiveIntervention,
+      };
+    }
+    return {
+      ...sessionLikeState,
+      session: {
+        ...sessionLikeState.session,
+        interaction_mode: effectiveInteractionMode,
+      },
+      activeIntervention: effectiveActiveIntervention,
+    };
+  }, [effectiveActiveIntervention, effectiveInteractionMode, sessionLikeState]);
+
+  const handleReviewAction = useCallback(() => {
+    if (isReviewMode) {
+      window.location.assign(readReviewReturnUrl() ?? buildLiveRunUrl());
+      return;
+    }
+    if (completedSessionId) {
+      rememberReviewReturnUrl(window.location.href);
+      window.location.assign(buildReviewRunUrl(completedSessionId));
+    }
+  }, [completedSessionId, isReviewMode]);
+
   const selectReviewStep = useCallback((key: ReviewSelectionKey) => {
     if (key) {
+      setReviewPlaybackActive(false);
       setReviewSelection(key);
     }
   }, []);
 
   const goToPreviousStep = useCallback(() => {
+    setReviewPlaybackActive(false);
     setReviewSelection((current) => getAdjacentReviewSelection(reviewSteps, current, -1));
   }, [reviewSteps]);
 
   const goToNextStep = useCallback(() => {
+    setReviewPlaybackActive(false);
     setReviewSelection((current) => getAdjacentReviewSelection(reviewSteps, current, 1));
   }, [reviewSteps]);
 
   const jumpToNextIntervention = useCallback(() => {
+    setReviewPlaybackActive(false);
     setReviewSelection((current) => jumpToNextReviewStep(reviewSteps, current, (step) => step.isIntervention));
   }, [reviewSteps]);
 
   const jumpToNextPageChange = useCallback(() => {
+    setReviewPlaybackActive(false);
     setReviewSelection((current) => jumpToNextReviewStep(reviewSteps, current, (step) => step.isPageTransition));
   }, [reviewSteps]);
+
+  const toggleReviewPlayback = useCallback(() => {
+    if (reviewPlaybackActive) {
+      setReviewPlaybackActive(false);
+      return;
+    }
+    const firstStep = reviewSteps[0] ?? null;
+    if (!firstStep) {
+      return;
+    }
+    setReviewSelection(firstStep.key);
+    setReviewPlaybackActive(true);
+  }, [reviewPlaybackActive, reviewSteps]);
+
+  const toggleReviewPlaybackSpeed = useCallback(() => {
+    setReviewPlaybackSpeed((current) => (current === 1 ? 2 : 1));
+  }, []);
 
   return (
     <div className="app-shell">
       <StatusBar
-        state={sessionLikeState}
+        state={renderedSessionLikeState}
         leftRailCollapsed={leftRailCollapsed}
         onToggleLeftRail={() => setLeftRailCollapsed((value) => !value)}
+        showActivityToggle={isReviewMode}
+        reviewActionLabel={reviewActionLabel}
+        onReviewAction={reviewActionLabel ? handleReviewAction : null}
         spriteFamily={spriteFamily}
         onSpriteFamilyChange={setSpriteFamily}
       />
@@ -661,6 +953,22 @@ export default function App() {
                   </div>
                 </div>
                 <div className="review-header-actions">
+                  <button
+                    type="button"
+                    className={`review-nav-button${reviewPlaybackActive ? " is-active" : ""}`}
+                    onClick={toggleReviewPlayback}
+                    disabled={reviewSteps.length <= 1}
+                  >
+                    {reviewPlaybackActive ? "Pause" : "Replay"}
+                  </button>
+                  <button
+                    type="button"
+                    className="review-nav-button"
+                    onClick={toggleReviewPlaybackSpeed}
+                    disabled={reviewSteps.length <= 1}
+                  >
+                    {reviewPlaybackSpeed}x
+                  </button>
                   <button type="button" className="review-nav-button" onClick={goToPreviousStep}>
                     Prev
                   </button>
@@ -695,36 +1003,42 @@ export default function App() {
               {reviewMetricsVisible ? <ReviewMetricsSummary metrics={reviewData.artifact.metrics} /> : null}
             </div>
           ) : null}
-          <div
-            className={`rail-stack rail-stack-left rail-stack-overlay rail-stack-overlay-left${leftRailCollapsed ? " is-collapsed" : ""}`}
-          >
-            <TimelinePanel
-              state={sessionLikeState}
-              reviewArtifact={reviewData?.artifact ?? null}
-              reviewEvents={reviewData?.events ?? []}
-              reviewCommands={reviewData?.commands ?? []}
-              reviewLoading={reviewLoading}
-              reviewError={reviewError}
-              selectedReviewKey={reviewSelection}
-              onSelectReviewKey={selectReviewStep}
-            />
-          </div>
+          {isReviewMode ? (
+            <div
+              className={`rail-stack rail-stack-left rail-stack-overlay rail-stack-overlay-left${leftRailCollapsed ? " is-collapsed" : ""}`}
+            >
+              <TimelinePanel
+                state={renderedSessionLikeState}
+                reviewArtifact={reviewData?.artifact ?? null}
+                reviewEvents={reviewData?.events ?? []}
+                reviewCommands={reviewData?.commands ?? []}
+                reviewLoading={reviewLoading}
+                reviewError={reviewError}
+                selectedReviewKey={reviewSelection}
+                onSelectReviewKey={selectReviewStep}
+              />
+            </div>
+          ) : null}
           <LiveStage
             snapshot={renderedSnapshot}
-            adapterId={sessionLikeState.activeAdapterId}
-            taskText={sessionLikeState.session?.task_text ?? "Watching your current task"}
-            supportsFrames={sessionLikeState.session?.capabilities.supports_frames ?? Boolean(renderedSnapshot.frameSrc)}
+            hasAgentActivity={renderedSessionLikeState.lastEventSeq > 0}
+            sessionId={renderedSessionLikeState.session?.session_id}
+            adapterId={renderedSessionLikeState.activeAdapterId}
+            taskText={renderedSessionLikeState.session?.task_text ?? "Watching your current task"}
+            supportsFrames={renderedSessionLikeState.session?.capabilities.supports_frames ?? Boolean(renderedSnapshot.frameSrc)}
             videoStream={WEBRTC_ENABLED ? webrtcStream : null}
             videoStatus={webrtcStatus}
             frameFps={frameFps}
-            activeIntervention={previewState.activeIntervention ?? sessionLikeState.activeIntervention}
-            browserContext={sessionLikeState.browserContext}
-            capabilities={sessionLikeState.session?.capabilities ?? null}
-            interactionMode={previewState.interactionModeOverride ?? sessionLikeState.session?.interaction_mode ?? "watch"}
-            observerMode={Boolean(sessionLikeState.session?.observer_mode)}
+            isNavigating={isNavigating}
+            activeIntervention={renderedSessionLikeState.activeIntervention}
+            browserContext={renderedSessionLikeState.browserContext}
+            capabilities={renderedSessionLikeState.session?.capabilities ?? null}
+            interactionMode={effectiveInteractionMode}
+            observerMode={Boolean(renderedSessionLikeState.session?.observer_mode)}
             reviewMode={isReviewMode}
             onCommand={sendCommand}
-            sessionStatus={sessionLikeState.session?.state}
+            onUiTelemetry={sendUiTelemetry}
+            sessionStatus={renderedSessionLikeState.session?.state}
             onStageReady={handleStageReady}
           />
         </section>

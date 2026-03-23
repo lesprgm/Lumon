@@ -39,22 +39,6 @@ function keyFor(kind: ReviewStep["kind"], id: string): string {
   return `${kind}:${id}`;
 }
 
-export function parseReviewSelectionKey(key: ReviewSelectionKey): { kind: string; id: string } | null {
-  if (!key) {
-    return null;
-  }
-  const separatorIndex = key.indexOf(":");
-  if (separatorIndex <= 0 || separatorIndex === key.length - 1) {
-    return null;
-  }
-  const kind = key.slice(0, separatorIndex);
-  const id = key.slice(separatorIndex + 1);
-  if (!kind || !id) {
-    return null;
-  }
-  return { kind, id };
-}
-
 function actionLabel(actionType: ActionType): string {
   switch (actionType) {
     case "navigate":
@@ -280,8 +264,13 @@ export function deriveReviewSteps(response: SessionArtifactResponse): ReviewStep
 }
 
 export function defaultReviewSelection(steps: ReviewStep[]): ReviewSelectionKey {
+  const lastStep = steps.at(-1) ?? null;
+  if (lastStep?.kind === "outcome") {
+    return lastStep.key;
+  }
+
   const preferred = [...steps].reverse().find((step) => step.kind === "intervention" || step.kind === "action");
-  return preferred?.key ?? steps.at(-1)?.key ?? null;
+  return preferred?.key ?? lastStep?.key ?? null;
 }
 
 export function resolveReviewSelection(
@@ -428,17 +417,91 @@ function metricTone(value: unknown): ReviewMetricItem["tone"] {
   return "neutral";
 }
 
+function formatMetricPixels(width: number | null | undefined, height: number | null | undefined): string {
+  if (width == null || height == null) {
+    return "not recorded";
+  }
+  return `${width} x ${height}`;
+}
+
+function formatMetricFps(value: number | null | undefined): string {
+  if (value == null) {
+    return "not recorded";
+  }
+  return `${value.toFixed(1)} fps`;
+}
+
+function formatMetricReasonCounts(counts: Record<string, number> | null | undefined): string {
+  if (counts == null) {
+    return "not recorded";
+  }
+  const entries = Object.entries(counts)
+    .filter(([, value]) => typeof value === "number" && value > 0)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  if (entries.length === 0) {
+    return "none";
+  }
+  return entries.map(([reason, count]) => `${reason} x${count}`).join(", ");
+}
+
+function metricReasonTone(counts: Record<string, number> | null | undefined): ReviewMetricItem["tone"] {
+  if (counts == null) {
+    return "missing";
+  }
+  return "neutral";
+}
+
 export function buildReviewMetricItems(metrics: SessionMetrics): ReviewMetricItem[] {
   return [
+    {
+      label: "Cold start",
+      value: formatMetricDuration(metrics.startup_latency_ms),
+      tone: metricTone(metrics.startup_latency_ms),
+    },
     {
       label: "Attach latency",
       value: formatMetricDuration(metrics.attach_latency_ms),
       tone: metricTone(metrics.attach_latency_ms),
     },
     {
+      label: "First browser frame",
+      value: formatMetricDuration(metrics.first_frame_latency_ms),
+      tone: metricTone(metrics.first_frame_latency_ms),
+    },
+    {
       label: "Browser open latency",
       value: formatMetricDuration(metrics.ui_open_latency_ms),
       tone: metricTone(metrics.ui_open_latency_ms),
+    },
+    {
+      label: "Meaningful frame",
+      value: formatMetricDuration(metrics.meaningful_frame_latency_ms),
+      tone: metricTone(metrics.meaningful_frame_latency_ms),
+    },
+    {
+      label: "Browser to frame",
+      value: formatMetricDuration(metrics.browser_to_meaningful_frame_latency_ms),
+      tone: metricTone(metrics.browser_to_meaningful_frame_latency_ms),
+    },
+    {
+      label: "Decision point",
+      value: formatMetricDuration(metrics.intervention_latency_ms),
+      tone: metricTone(metrics.intervention_latency_ms),
+    },
+    {
+      label: "Clarity ready",
+      value: formatMetricDuration(metrics.clarity_latency_ms),
+      tone:
+        metrics.clarity_within_2s == null
+          ? "missing"
+          : metrics.clarity_within_2s
+            ? "success"
+            : "warning",
+    },
+    {
+      label: "Sprite after frame",
+      value: formatMetricDuration(metrics.sprite_after_frame_latency_ms),
+      tone: metricTone(metrics.sprite_after_frame_latency_ms),
     },
     {
       label: "Browser episodes",
@@ -459,6 +522,51 @@ export function buildReviewMetricItems(metrics: SessionMetrics): ReviewMetricIte
       label: "Duplicate attaches prevented",
       value: String(metrics.duplicate_attach_prevented),
       tone: metrics.duplicate_attach_prevented > 0 ? "success" : "neutral",
+    },
+    {
+      label: "Open attempts",
+      value: String(metrics.open_attempt_count ?? "not recorded"),
+      tone: metrics.open_attempt_count == null ? "missing" : "neutral",
+    },
+    {
+      label: "Open suppressions",
+      value: String(metrics.open_suppressed_count ?? "not recorded"),
+      tone:
+        metrics.open_suppressed_count == null
+          ? "missing"
+          : (metrics.open_suppressed_count ?? 0) > 0
+            ? "success"
+            : "neutral",
+    },
+    {
+      label: "False opens",
+      value: String(metrics.false_open_count ?? "not recorded"),
+      tone:
+        metrics.false_open_count == null
+          ? "missing"
+          : (metrics.false_open_count ?? 0) > 0
+            ? "warning"
+            : "success",
+    },
+    {
+      label: "Noisy opens prevented",
+      value: String(metrics.noisy_open_prevented_count ?? "not recorded"),
+      tone:
+        metrics.noisy_open_prevented_count == null
+          ? "missing"
+          : (metrics.noisy_open_prevented_count ?? 0) > 0
+            ? "success"
+            : "neutral",
+    },
+    {
+      label: "Open reasons",
+      value: formatMetricReasonCounts(metrics.open_reason_counts),
+      tone: metricReasonTone(metrics.open_reason_counts),
+    },
+    {
+      label: "Suppression reasons",
+      value: formatMetricReasonCounts(metrics.open_suppression_reason_counts),
+      tone: metricReasonTone(metrics.open_suppression_reason_counts),
     },
     {
       label: "Browser commands",
@@ -504,6 +612,19 @@ export function buildReviewMetricItems(metrics: SessionMetrics): ReviewMetricIte
           : (metrics.stale_target_count ?? 0) > 0
             ? "warning"
             : "neutral",
+    },
+    {
+      label: "Peak video size",
+      value: formatMetricPixels(metrics.peak_video_width, metrics.peak_video_height),
+      tone:
+        metrics.peak_video_width == null || metrics.peak_video_height == null
+          ? "missing"
+          : "neutral",
+    },
+    {
+      label: "Peak video fps",
+      value: formatMetricFps(metrics.peak_video_fps),
+      tone: metrics.peak_video_fps == null ? "missing" : "neutral",
     },
     {
       label: "Session completed",

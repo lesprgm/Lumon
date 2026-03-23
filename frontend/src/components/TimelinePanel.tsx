@@ -302,8 +302,8 @@ export function TimelinePanel({
                 <div className="panel-empty">No browser commands were recorded.</div>
               ) : null}
               {filterBrowserCommands(reviewCommands ?? [], query, interventionsOnly).map((command) => (
-                <article key={`command:${command.command}:${command.command_id}`} className="timeline-row is-action">
-                  <div className="timeline-summary">{command.summary_text}</div>
+                <article key={`command:${command.command}:${command.command_id}`} className={`timeline-row is-action ${command.status === 'blocked' || command.status === 'failed' ? 'is-blocked' : ''}`}>
+                  <div className="timeline-summary" title={command.summary_text}>{command.summary_text}</div>
                   <div className="timeline-meta">
                     <span>{command.command}</span>
                     <span>{command.domain || "current page"}</span>
@@ -338,9 +338,9 @@ export function TimelinePanel({
               {filteredBrowserCommands.map((command) => (
                 <article
                   key={`command:${command.command}:${command.command_id}`}
-                  className={command === filteredBrowserCommands[filteredBrowserCommands.length - 1] ? "timeline-row active is-action" : "timeline-row is-action"}
+                  className={`${command === filteredBrowserCommands[filteredBrowserCommands.length - 1] ? "timeline-row active is-action" : "timeline-row is-action"} ${command.status === 'blocked' || command.status === 'failed' ? 'is-blocked' : ''}`}
                 >
-                  <div className="timeline-summary">{command.summary_text}</div>
+                  <div className="timeline-summary" title={command.summary_text}>{command.summary_text}</div>
                   <div className="timeline-meta">
                     <span>{command.command}</span>
                     <span>{command.domain || "current page"}</span>

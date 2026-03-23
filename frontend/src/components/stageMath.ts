@@ -1,5 +1,5 @@
-const BASE_WIDTH = 1280;
-const BASE_HEIGHT = 800;
+const BASE_WIDTH = 1920;
+const BASE_HEIGHT = 1080;
 
 export function scaleX(x: number, width: number): number {
   return (x / BASE_WIDTH) * width;

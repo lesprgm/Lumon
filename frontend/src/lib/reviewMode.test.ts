@@ -6,7 +6,6 @@ import {
   defaultReviewSelection,
   deriveReviewSteps,
   jumpToNextReviewStep,
-  parseReviewSelectionKey,
   resolveReviewSelection,
 } from "./reviewMode";
 import { resolveReviewKeyframePath } from "./reviewKeyframes";
@@ -63,21 +62,24 @@ const response: SessionArtifactResponse = {
       },
     ],
     keyframes: ["output/sessions/sess_review_001/keyframes/approved.png"],
-    metrics: {
-      attach_requested_at: "2026-03-12T10:00:00.000Z",
-      attached_at: "2026-03-12T10:00:01.000Z",
-      first_browser_event_at: "2026-03-12T10:00:05.000Z",
-      ui_open_requested_at: "2026-03-12T10:00:05.300Z",
-      ui_ready_at: null,
-      attach_latency_ms: 1000,
-      ui_open_latency_ms: null,
+      metrics: {
+        attach_requested_at: "2026-03-12T10:00:00.000Z",
+        attached_at: "2026-03-12T10:00:01.000Z",
+        first_browser_event_at: "2026-03-12T10:00:05.000Z",
+        ui_open_requested_at: "2026-03-12T10:00:05.300Z",
+        ui_ready_at: null,
+        attach_latency_ms: 1000,
+        first_frame_latency_ms: 1800,
+        ui_open_latency_ms: null,
       browser_episode_count: 1,
-      intervention_count: 1,
-      reconnect_count: 0,
-      duplicate_attach_prevented: 1,
-      session_completed: true,
-      artifact_written: true,
-    },
+        intervention_count: 1,
+        reconnect_count: 0,
+        duplicate_attach_prevented: 1,
+        open_reason_counts: { browser: 1, open: 2 },
+        open_suppression_reason_counts: { already_visible: 3, duplicate_signal: 1 },
+        session_completed: true,
+        artifact_written: true,
+      },
   },
   events: [
     {
@@ -132,14 +134,20 @@ describe("reviewMode helpers", () => {
 
     const selection = resolveReviewSelection(response, steps, defaultReviewSelection(steps));
 
-    expect(selection.selectedStep?.kind).toBe("intervention");
-    expect(selection.linkedEvent?.event_id).toBe("evt_review_001");
+    expect(selection.selectedStep?.kind).toBe("outcome");
+    expect(selection.linkedEvent).toBeNull();
     expect(selection.browserContext?.domain).toBe("docs.example.com");
 
     const summary = buildReviewStepSummary(response.artifact, selection);
-    expect(summary.kicker).toBe("Intervention");
-    expect(summary.outcome).toBe("Approved");
-    expect(summary.target).toBe("Submit the selected example");
+    expect(summary.kicker).toBe("Outcome");
+    expect(summary.outcome).toBe("completed");
+    expect(summary.target).toBeNull();
+  });
+
+  it("defaults to the final outcome step when the run is terminal", () => {
+    const steps = deriveReviewSteps(response);
+
+    expect(defaultReviewSelection(steps)).toBe("outcome:sess_review_001");
   });
 
   it("jumps to the next page change or intervention without resetting the selection", () => {
@@ -157,7 +165,12 @@ describe("reviewMode helpers", () => {
     const items = buildReviewMetricItems(response.artifact.metrics);
 
     expect(items.find((item) => item.label === "Attach latency")?.value).toBe("1000 ms");
+    expect(items.find((item) => item.label === "First browser frame")?.value).toBe("1800 ms");
     expect(items.find((item) => item.label === "Browser open latency")?.value).toBe("not recorded");
+    expect(items.find((item) => item.label === "Open reasons")?.value).toBe("open x2, browser x1");
+    expect(items.find((item) => item.label === "Suppression reasons")?.value).toBe(
+      "already_visible x3, duplicate_signal x1",
+    );
     expect(items.find((item) => item.label === "Artifact written")?.value).toBe("yes");
   });
 
@@ -198,12 +211,5 @@ describe("reviewMode helpers", () => {
     const keyframePath = resolveReviewKeyframePath(withFinalKeyframe, "page:2026-03-12T10:00:05.000Z", null, null);
 
     expect(keyframePath).toBe("output/sessions/sess_review_001/keyframes/reference.png");
-  });
-
-  it("parses review selection keys without truncating ISO timestamps", () => {
-    expect(parseReviewSelectionKey("page:2026-03-12T10:00:05.000Z")).toEqual({
-      kind: "page",
-      id: "2026-03-12T10:00:05.000Z",
-    });
   });
 });
