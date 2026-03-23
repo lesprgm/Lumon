@@ -23,28 +23,28 @@ EmitBrowserContext = Callable[[dict[str, Any]], Awaitable[None]]
 GateCheck = Callable[[], Awaitable[None]]
 
 PRE_ACTION_DELAY_SECONDS: dict[ActionType, float] = {
-    ActionType.NAVIGATE: 0.28,
-    ActionType.CLICK: 0.18,
-    ActionType.TYPE: 0.24,
-    ActionType.SCROLL: 0.16,
+    ActionType.NAVIGATE: 0.8,
+    ActionType.CLICK: 0.8,
+    ActionType.TYPE: 0.6,
+    ActionType.SCROLL: 0.4,
     ActionType.READ: 0.14,
     ActionType.SPAWN_SUBAGENT: 0.12,
     ActionType.SUBAGENT_RESULT: 0.12,
 }
 
 POST_ACTION_DELAY_SECONDS: dict[ActionType, float] = {
-    ActionType.NAVIGATE: 0.55,
-    ActionType.CLICK: 0.32,
-    ActionType.TYPE: 0.38,
-    ActionType.SCROLL: 0.28,
+    ActionType.NAVIGATE: 1.2,
+    ActionType.CLICK: 0.5,
+    ActionType.TYPE: 0.5,
+    ActionType.SCROLL: 0.4,
     ActionType.READ: 0.42,
     ActionType.SPAWN_SUBAGENT: 0.2,
     ActionType.SUBAGENT_RESULT: 0.26,
 }
 
-TARGET_RESOLUTION_TIMEOUT_SECONDS = 1.5
-TYPE_ACTION_TIMEOUT_SECONDS = 5.0
-VALUE_READ_TIMEOUT_SECONDS = 1.5
+TARGET_RESOLUTION_TIMEOUT_SECONDS = 0.5
+TYPE_ACTION_TIMEOUT_SECONDS = 3.0
+VALUE_READ_TIMEOUT_SECONDS = 0.5
 
 
 async def _noop_emit_browser_context(_payload: dict[str, Any]) -> None:
@@ -64,6 +64,7 @@ class BrowserActionLayer:
         emit_browser_context: EmitBrowserContext = _noop_emit_browser_context,
         event_seq_supplier: Callable[[], int],
         gate_check: GateCheck,
+        frame_sync: Callable[[], asyncio.Event] | None = None,
     ) -> None:
         self.session_id = session_id
         self.adapter_id = adapter_id
@@ -74,6 +75,7 @@ class BrowserActionLayer:
         self.emit_browser_context = emit_browser_context
         self.next_event_seq = event_seq_supplier
         self.gate_check = gate_check
+        self._frame_sync = frame_sync
 
     async def navigate(
         self,
@@ -82,6 +84,7 @@ class BrowserActionLayer:
         html_content: str | None = None,
         summary_text: str = "Opening travel site",
         intent: str | None = None,
+        fast: bool = False,
     ) -> None:
         await self.gate_check()
         cursor, target_rect, meta = await self._target_for_selector("body")
@@ -95,18 +98,22 @@ class BrowserActionLayer:
             intent=intent or f"Navigate to {url}",
             cursor=cursor,
             target_rect=target_rect,
-            meta={**meta, "url": url},
+            meta={**meta, "url": url, "fast": fast},
         )
-        await self._pause_before_action(ActionType.NAVIGATE)
+        if not fast:
+            await self._pause_before_action(ActionType.NAVIGATE)
+        wait_until = "domcontentloaded" if fast else "load"
         if html_content is not None:
             encoded = urllib.parse.quote(html_content)
             await self.page.goto(
-                f"data:text/html;charset=utf-8,{encoded}", wait_until="load"
+                f"data:text/html;charset=utf-8,{encoded}", wait_until=wait_until
             )
         else:
-            await self.page.goto(url, wait_until="load")
+            await self.page.goto(url, wait_until=wait_until)
         await self.refresh_browser_context()
-        await self._pause_after_action(ActionType.NAVIGATE)
+        if not fast:
+            await self._pause_after_action(ActionType.NAVIGATE)
+            await self._wait_for_frame()
 
     async def click(
         self, selector: str, summary_text: str, intent: str, risky: bool = False
@@ -129,9 +136,10 @@ class BrowserActionLayer:
             risk_level=RiskLevel.HIGH if risky else RiskLevel.NONE,
             meta=meta,
         )
-        await self._pause_before_action(ActionType.CLICK)
-        await locator.click()
+        await self._pause_before_action(ActionType.CLICK, selector=selector)
+        await locator.click(force=True, timeout=5000)
         await self._pause_after_action(ActionType.CLICK)
+        await self._wait_for_frame()
         return {
             "before_url": before_url,
             "after_url": str(getattr(self.page, "url", "")),
@@ -166,7 +174,7 @@ class BrowserActionLayer:
                 "text_mask": "***" if masked else None,
             },
         )
-        await self._pause_before_action(ActionType.TYPE)
+        await self._pause_before_action(ActionType.TYPE, selector=selector)
         await self._type_value(locator, value)
         await self._pause_after_action(ActionType.TYPE)
         value_after = None
@@ -549,7 +557,28 @@ class BrowserActionLayer:
             return int(value)
         return 0
 
-    async def _pause_before_action(self, action_type: ActionType) -> None:
+    async def _pause_before_action(
+        self, action_type: ActionType, selector: str | None = None
+    ) -> None:
+        if selector and hasattr(self.page, "evaluate"):
+            with contextlib.suppress(Exception):
+                await self.page.evaluate(
+                    """
+                    (selector) => {
+                      const el = document.querySelector(selector);
+                      if (!el) return;
+                      const originalStyle = el.style.cssText;
+                      el.style.outline = '4px solid #ff4444';
+                      el.style.outlineOffset = '2px';
+                      el.style.backgroundColor = 'rgba(255, 68, 68, 0.1)';
+                      el.style.transition = 'all 0.2s ease-in-out';
+                      setTimeout(() => {
+                        el.style.cssText = originalStyle;
+                      }, 1200);
+                    }
+                    """,
+                    selector,
+                )
         delay = PRE_ACTION_DELAY_SECONDS.get(action_type, 0.0)
         if delay > 0:
             await asyncio.sleep(delay)
@@ -558,6 +587,17 @@ class BrowserActionLayer:
         delay = POST_ACTION_DELAY_SECONDS.get(action_type, 0.0)
         if delay > 0:
             await asyncio.sleep(delay)
+
+    async def _wait_for_frame(self) -> None:
+        if self._frame_sync is None:
+            return
+        frame_event = self._frame_sync()
+        if frame_event is None:
+            return
+        try:
+            await asyncio.wait_for(frame_event.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
 
     async def _type_value(self, locator: Any, value: str) -> None:
         if hasattr(locator, "press_sequentially"):

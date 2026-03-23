@@ -55,12 +55,15 @@ def test_bootstrap_requires_allowed_origin_and_returns_no_store() -> None:
         rejected = client.get("/api/bootstrap", headers={"Origin": "http://evil.example"})
         assert rejected.status_code == 403
 
-        accepted = client.get("/api/bootstrap", headers={"Origin": "http://127.0.0.1:5173"})
+        accepted = client.get("/api/bootstrap", headers={"Origin": "http://127.0.0.1:8000"})
         assert accepted.status_code == 200
         payload = accepted.json()
         assert payload["session_id"].startswith("sess_")
         assert payload["ws_token"].startswith("ws_")
         assert accepted.headers["cache-control"] == "no-store"
+
+        local_without_origin = client.get("/api/bootstrap")
+        assert local_without_origin.status_code == 200
 
 
 def test_local_harness_pages_are_local_only() -> None:
@@ -73,6 +76,18 @@ def test_local_harness_pages_are_local_only() -> None:
     assert "Search Wikipedia" in search.text
     assert approval.status_code == 200
     assert "Submit order" in approval.text
+
+
+def test_backend_serves_built_frontend_shell() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        root = client.get("/")
+        ready = client.get("/__lumon_frontend_ready__")
+
+    assert root.status_code == 200
+    assert "id=\"root\"" in root.text or "id='root'" in root.text
+    assert ready.status_code == 200
+    assert ready.json()["frontend"] == "static"
 
 
 def test_local_approval_endpoints_are_local_only(monkeypatch: pytest.MonkeyPatch) -> None:

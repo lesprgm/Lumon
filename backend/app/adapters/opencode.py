@@ -21,7 +21,9 @@ from app.utils.ids import new_id
 
 WebBridgeId = Literal["playwright_native"]
 WebModeId = Literal["observe_only", "delegate_playwright"]
-COMMAND_DELEGATE_READY_TIMEOUT_SECONDS = float(os.getenv("LUMON_COMMAND_DELEGATE_READY_TIMEOUT_SECONDS", "45"))
+COMMAND_DELEGATE_READY_TIMEOUT_SECONDS = float(
+    os.getenv("LUMON_COMMAND_DELEGATE_READY_TIMEOUT_SECONDS", "45")
+)
 
 _URL_PATTERN = re.compile(r"https?://[^\s)>\"]+")
 
@@ -89,7 +91,9 @@ class OpenCodeConnector(AdapterConnector):
         self.pending_bridge_offer = None
         self.declined_bridge_source_ids.clear()
         self.auto_delegate = auto_delegate
-        self.selected_web_mode = self._coerce_web_mode(web_mode, web_bridge, observer_mode)
+        self.selected_web_mode = self._coerce_web_mode(
+            web_mode, web_bridge, observer_mode
+        )
         self.selected_web_bridge = self._bridge_for_mode(self.selected_web_mode)
         self.active_web_bridge = None
         self.bridge_connector = None
@@ -126,8 +130,13 @@ class OpenCodeConnector(AdapterConnector):
                     summary_text="OpenCode CLI missing for live mode",
                     severity="error",
                 )
-                await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode run failed: opencode CLI not found in PATH")
-                await self.runtime.complete_task(status="failed", summary_text="OpenCode adapter run failed")
+                await self.runtime.emit_error(
+                    ErrorCode.INVALID_STATE,
+                    "OpenCode run failed: opencode CLI not found in PATH",
+                )
+                await self.runtime.complete_task(
+                    status="failed", summary_text="OpenCode adapter run failed"
+                )
             else:
                 self._emit_runtime_decision(
                     reason_code="run_live_selected",
@@ -144,9 +153,13 @@ class OpenCodeConnector(AdapterConnector):
                 severity="error",
                 error=str(exc),
             )
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, f"OpenCode runtime failed: {exc}")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE, f"OpenCode runtime failed: {exc}"
+            )
             await self.runtime.transition_to(SessionState.FAILED)
-            await self.runtime.complete_task(status="failed", summary_text="OpenCode adapter run failed")
+            await self.runtime.complete_task(
+                status="failed", summary_text="OpenCode adapter run failed"
+            )
         finally:
             await self._stop_bridge()
 
@@ -196,7 +209,9 @@ class OpenCodeConnector(AdapterConnector):
                 await self._launch_web_bridge(raw, task_text, demo_mode=True)
                 bridge_result = await self._wait_for_bridge_completion()
                 if bridge_result and bridge_result[0] != "completed":
-                    await self.runtime.complete_task(status=bridge_result[0], summary_text=bridge_result[1])
+                    await self.runtime.complete_task(
+                        status=bridge_result[0], summary_text=bridge_result[1]
+                    )
                     return
             await asyncio.sleep(0.35)
 
@@ -228,8 +243,13 @@ class OpenCodeConnector(AdapterConnector):
                 summary_text="OpenCode CLI executable not found at launch",
                 severity="error",
             )
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode run failed: opencode CLI not found in PATH")
-            await self.runtime.complete_task(status="failed", summary_text="OpenCode adapter run failed")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE,
+                "OpenCode run failed: opencode CLI not found in PATH",
+            )
+            await self.runtime.complete_task(
+                status="failed", summary_text="OpenCode adapter run failed"
+            )
             return
         except OSError as exc:
             self._emit_runtime_decision(
@@ -238,8 +258,13 @@ class OpenCodeConnector(AdapterConnector):
                 severity="error",
                 error=str(exc),
             )
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, f"OpenCode run failed: unable to launch opencode CLI ({exc})")
-            await self.runtime.complete_task(status="failed", summary_text="OpenCode adapter run failed")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE,
+                f"OpenCode run failed: unable to launch opencode CLI ({exc})",
+            )
+            await self.runtime.complete_task(
+                status="failed", summary_text="OpenCode adapter run failed"
+            )
             return
         assert self.process.stdout is not None
         assert self.process.stderr is not None
@@ -259,7 +284,9 @@ class OpenCodeConnector(AdapterConnector):
                 if self._is_error_event(parsed):
                     saw_error_event = True
                     last_error_message = self._error_message_for(parsed)
-                await self.runtime.emit_agent_event(self._normalize_opencode_event(parsed))
+                await self.runtime.emit_agent_event(
+                    self._normalize_opencode_event(parsed)
+                )
                 await self._maybe_emit_browser_context(parsed)
                 if self._should_launch_web_bridge(parsed, task_text):
                     await self._launch_web_bridge(parsed, task_text, demo_mode=False)
@@ -271,11 +298,17 @@ class OpenCodeConnector(AdapterConnector):
 
         bridge_result = await self._wait_for_bridge_completion()
         if bridge_result and bridge_result[0] != "completed":
-            await self.runtime.complete_task(status=bridge_result[0], summary_text=bridge_result[1])
+            await self.runtime.complete_task(
+                status=bridge_result[0], summary_text=bridge_result[1]
+            )
             return
 
         if return_code != 0:
-            detail = stderr_tail[-1] if stderr_tail else f"OpenCode exited with code {return_code}"
+            detail = (
+                stderr_tail[-1]
+                if stderr_tail
+                else f"OpenCode exited with code {return_code}"
+            )
             self._emit_runtime_decision(
                 reason_code="process_nonzero_exit",
                 summary_text="OpenCode CLI exited with non-zero status",
@@ -283,8 +316,12 @@ class OpenCodeConnector(AdapterConnector):
                 return_code=return_code,
                 detail=detail,
             )
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, f"OpenCode run failed: {detail}")
-            await self.runtime.complete_task(status="failed", summary_text="OpenCode adapter run failed")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE, f"OpenCode run failed: {detail}"
+            )
+            await self.runtime.complete_task(
+                status="failed", summary_text="OpenCode adapter run failed"
+            )
             return
 
         if saw_error_event:
@@ -295,8 +332,12 @@ class OpenCodeConnector(AdapterConnector):
                 severity="error",
                 detail=detail,
             )
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, f"OpenCode run failed: {detail}")
-            await self.runtime.complete_task(status="failed", summary_text="OpenCode adapter run failed")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE, f"OpenCode run failed: {detail}"
+            )
+            await self.runtime.complete_task(
+                status="failed", summary_text="OpenCode adapter run failed"
+            )
             return
 
         if not saw_event:
@@ -311,9 +352,13 @@ class OpenCodeConnector(AdapterConnector):
                 )
             )
 
-        await self.runtime.complete_task(status="completed", summary_text="OpenCode adapter run completed")
+        await self.runtime.complete_task(
+            status="completed", summary_text="OpenCode adapter run completed"
+        )
 
-    def _emit_runtime_decision(self, *, reason_code: str, summary_text: str, severity: str, **extra: Any) -> None:
+    def _emit_runtime_decision(
+        self, *, reason_code: str, summary_text: str, severity: str, **extra: Any
+    ) -> None:
         emit = getattr(self.runtime, "emit_routing_decision", None)
         if emit is None:
             return
@@ -332,7 +377,9 @@ class OpenCodeConnector(AdapterConnector):
             }
         )
 
-    def _emit_observer_decision(self, *, reason_code: str, summary_text: str, severity: str, **extra: Any) -> None:
+    def _emit_observer_decision(
+        self, *, reason_code: str, summary_text: str, severity: str, **extra: Any
+    ) -> None:
         emit = getattr(self.runtime, "emit_routing_decision", None)
         if emit is None:
             return
@@ -368,7 +415,11 @@ class OpenCodeConnector(AdapterConnector):
         task_text: str | None = None,
     ) -> None:
         if not self.observer_mode:
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode observer event received without observer mode", command_type="observer_event")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE,
+                "OpenCode observer event received without observer mode",
+                command_type="observer_event",
+            )
             return
         if source_event_id in self._observed_source_event_id_set:
             self._emit_observer_decision(
@@ -402,15 +453,26 @@ class OpenCodeConnector(AdapterConnector):
         await self.runtime.emit_agent_event(self._normalize_opencode_event(raw_event))
         await self._maybe_emit_browser_context(raw_event)
         if self.observer_mode and self._delegation_enabled():
-            if self.auto_delegate and self._should_launch_web_bridge(raw_event, self.runtime.task_text):
-                await self._launch_web_bridge(raw_event, self.runtime.task_text, demo_mode=False)
+            if self.auto_delegate and self._should_launch_web_bridge(
+                raw_event, self.runtime.task_text
+            ):
+                await self._launch_web_bridge(
+                    raw_event, self.runtime.task_text, demo_mode=False
+                )
             else:
                 await self._maybe_offer_bridge(raw_event, self.runtime.task_text)
-        elif not self.observer_mode and self._should_launch_web_bridge(raw_event, self.runtime.task_text):
-            await self._launch_web_bridge(raw_event, self.runtime.task_text, demo_mode=False)
+        elif not self.observer_mode and self._should_launch_web_bridge(
+            raw_event, self.runtime.task_text
+        ):
+            await self._launch_web_bridge(
+                raw_event, self.runtime.task_text, demo_mode=False
+            )
 
     def _remember_observed_source_event_id(self, source_event_id: str) -> None:
-        if len(self._observed_source_event_ids) == self._observed_source_event_ids.maxlen:
+        if (
+            len(self._observed_source_event_ids)
+            == self._observed_source_event_ids.maxlen
+        ):
             oldest = self._observed_source_event_ids.popleft()
             self._observed_source_event_id_set.discard(oldest)
         self._observed_source_event_ids.append(source_event_id)
@@ -418,7 +480,11 @@ class OpenCodeConnector(AdapterConnector):
 
     async def observer_complete(self, status: str, summary_text: str) -> None:
         if not self.observer_mode:
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode observer completion received without observer mode", command_type="observer_complete")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE,
+                "OpenCode observer completion received without observer mode",
+                command_type="observer_complete",
+            )
             return
 
         if status != "completed":
@@ -436,7 +502,11 @@ class OpenCodeConnector(AdapterConnector):
 
     async def accept_bridge(self) -> bool:
         if self.pending_bridge_offer is None:
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, "No pending bridge offer to accept", command_type="accept_bridge")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE,
+                "No pending bridge offer to accept",
+                command_type="accept_bridge",
+            )
             return False
         offer = self.pending_bridge_offer
         source_event_id = str(offer["raw_event"].get("id") or "")
@@ -449,12 +519,18 @@ class OpenCodeConnector(AdapterConnector):
             web_bridge=self.selected_web_bridge,
         )
         self.pending_bridge_offer = None
-        await self._launch_web_bridge(offer["raw_event"], offer["task_text"], demo_mode=False)
+        await self._launch_web_bridge(
+            offer["raw_event"], offer["task_text"], demo_mode=False
+        )
         return True
 
     async def decline_bridge(self) -> bool:
         if self.pending_bridge_offer is None:
-            await self.runtime.emit_error(ErrorCode.INVALID_STATE, "No pending bridge offer to decline", command_type="decline_bridge")
+            await self.runtime.emit_error(
+                ErrorCode.INVALID_STATE,
+                "No pending bridge offer to decline",
+                command_type="decline_bridge",
+            )
             return False
         source_event_id = str(self.pending_bridge_offer["raw_event"].get("id") or "")
         self._emit_observer_decision(
@@ -471,7 +547,9 @@ class OpenCodeConnector(AdapterConnector):
         await self.runtime.emit_session_state()
         return True
 
-    async def _launch_web_bridge(self, raw: dict[str, Any], task_text: str, *, demo_mode: bool) -> None:
+    async def _launch_web_bridge(
+        self, raw: dict[str, Any], task_text: str, *, demo_mode: bool
+    ) -> None:
         if not self._delegation_enabled():
             self._emit_observer_decision(
                 reason_code="bridge_launch_guard_delegation_disabled",
@@ -500,7 +578,10 @@ class OpenCodeConnector(AdapterConnector):
             reason_code="bridge_launch_started",
             summary_text="Bridge launch started",
             severity="info",
-            source_event_id=str(raw.get("id") or raw.get("event_id") or raw.get("source_event_id") or "") or None,
+            source_event_id=str(
+                raw.get("id") or raw.get("event_id") or raw.get("source_event_id") or ""
+            )
+            or None,
             web_mode=self.selected_web_mode,
             web_bridge=bridge_id,
             demo_mode=demo_mode,
@@ -531,14 +612,21 @@ class OpenCodeConnector(AdapterConnector):
             bridge_context=bridge_context,
         )
 
-    async def ensure_browser_delegate(self, *, observed_session_id: str, task_text: str) -> None:
+    async def ensure_browser_delegate(
+        self, *, observed_session_id: str, task_text: str
+    ) -> None:
         if self.observed_session_id is None:
             self.observed_session_id = observed_session_id
         self.selected_web_mode = "delegate_playwright"
         self.selected_web_bridge = "playwright_native"
         self.auto_delegate = True
-        bridge_alive = bool(getattr(self.bridge_connector, "_bridge_is_alive", lambda: True)())
-        if self.bridge_connector is not None and (not getattr(self.bridge_connector, "command_mode", False) or not bridge_alive):
+        bridge_alive = bool(
+            getattr(self.bridge_connector, "_bridge_is_alive", lambda: True)()
+        )
+        if self.bridge_connector is not None and (
+            not getattr(self.bridge_connector, "command_mode", False)
+            or not bridge_alive
+        ):
             await self._stop_bridge()
         if not self._bridge_is_running():
             await self._launch_web_bridge(
@@ -552,7 +640,9 @@ class OpenCodeConnector(AdapterConnector):
                 task_text,
                 demo_mode=False,
             )
-        if self.bridge_connector is not None and hasattr(self.bridge_connector, "command_ready"):
+        if self.bridge_connector is not None and hasattr(
+            self.bridge_connector, "command_ready"
+        ):
             try:
                 await asyncio.wait_for(
                     self.bridge_connector.command_ready.wait(),
@@ -560,9 +650,13 @@ class OpenCodeConnector(AdapterConnector):
                 )  # type: ignore[attr-defined]
             except asyncio.TimeoutError as exc:
                 await self._stop_bridge()
-                raise RuntimeError("Lumon browser delegate did not become ready in time") from exc
+                raise RuntimeError(
+                    "Lumon browser delegate did not become ready in time"
+                ) from exc
 
-    async def execute_browser_command(self, payload: BrowserCommandRequest | dict[str, Any]) -> dict[str, Any]:
+    async def execute_browser_command(
+        self, payload: BrowserCommandRequest | dict[str, Any]
+    ) -> dict[str, Any]:
         if not self._bridge_is_running() or self.bridge_connector is None:
             raise RuntimeError("Lumon browser delegate is not running")
         if not bool(getattr(self.bridge_connector, "_bridge_is_alive", lambda: True)()):
@@ -577,7 +671,9 @@ class OpenCodeConnector(AdapterConnector):
             return
         if not self._should_launch_web_bridge(raw, task_text):
             return
-        source_event_id = str(raw.get("id") or raw.get("event_id") or raw.get("source_event_id") or "")
+        source_event_id = str(
+            raw.get("id") or raw.get("event_id") or raw.get("source_event_id") or ""
+        )
         if source_event_id and source_event_id in self.declined_bridge_source_ids:
             self._emit_observer_decision(
                 reason_code="bridge_offer_declined_cooldown",
@@ -594,7 +690,11 @@ class OpenCodeConnector(AdapterConnector):
                 source_event_id=source_event_id or None,
             )
             return
-        summary_text = str(raw.get("summary") or raw.get("message") or f"OpenCode can delegate browser control to {self.selected_web_bridge}")
+        summary_text = str(
+            raw.get("summary")
+            or raw.get("message")
+            or f"OpenCode can delegate browser control to {self.selected_web_bridge}"
+        )
         intent = str(raw.get("intent") or task_text)
         bridge_url = self._bridge_url(raw)
         self.pending_bridge_offer = {"raw_event": dict(raw), "task_text": task_text}
@@ -640,7 +740,11 @@ class OpenCodeConnector(AdapterConnector):
         return result
 
     def _bridge_is_running(self) -> bool:
-        return self.bridge_connector is not None and self.bridge_completion is not None and not self.bridge_completion.is_set()
+        return (
+            self.bridge_connector is not None
+            and self.bridge_completion is not None
+            and not self.bridge_completion.is_set()
+        )
 
     async def _on_bridge_complete(self, status: str, summary_text: str) -> None:
         self.bridge_result = (status, summary_text)
@@ -653,14 +757,18 @@ class OpenCodeConnector(AdapterConnector):
             if self.observer_mode and self.pending_observer_completion is not None:
                 pending_status, pending_summary = self.pending_observer_completion
                 self.pending_observer_completion = None
-                await self.runtime.complete_task(status=pending_status, summary_text=pending_summary)
+                await self.runtime.complete_task(
+                    status=pending_status, summary_text=pending_summary
+                )
             elif self.runtime.state in {
                 SessionState.PAUSE_REQUESTED,
                 SessionState.PAUSED,
                 SessionState.WAITING_FOR_APPROVAL,
                 SessionState.TAKEOVER,
             }:
-                await self.runtime.transition_to(SessionState.RUNNING, checkpoint_id=None)
+                await self.runtime.transition_to(
+                    SessionState.RUNNING, checkpoint_id=None
+                )
             else:
                 await self.runtime.emit_session_state()
         else:
@@ -694,7 +802,9 @@ class OpenCodeConnector(AdapterConnector):
             return value
         return None
 
-    def _coerce_web_mode(self, web_mode: str | None, web_bridge: str | None, observer_mode: bool) -> WebModeId:
+    def _coerce_web_mode(
+        self, web_mode: str | None, web_bridge: str | None, observer_mode: bool
+    ) -> WebModeId:
         if web_mode in {"observe_only", "delegate_playwright"}:
             return web_mode
         bridge = self._coerce_web_bridge(web_bridge)
@@ -710,7 +820,10 @@ class OpenCodeConnector(AdapterConnector):
         return None
 
     def _delegation_enabled(self) -> bool:
-        return self.selected_web_mode == "delegate_playwright" and self.selected_web_bridge is not None
+        return (
+            self.selected_web_mode == "delegate_playwright"
+            and self.selected_web_bridge is not None
+        )
 
     def _task_needs_web(self, task_text: str) -> bool:
         return task_mentions_browser(task_text)
@@ -718,7 +831,9 @@ class OpenCodeConnector(AdapterConnector):
     def _should_launch_web_bridge(self, raw: dict[str, Any], task_text: str) -> bool:
         event_type = str(raw.get("type") or raw.get("event_type") or "")
 
-        def _emit_decision(*, decision: dict[str, Any], should_launch: bool, reason_code: str) -> None:
+        def _emit_decision(
+            *, decision: dict[str, Any], should_launch: bool, reason_code: str
+        ) -> None:
             emit = getattr(self.runtime, "emit_routing_decision", None)
             if emit is None:
                 return
@@ -744,18 +859,32 @@ class OpenCodeConnector(AdapterConnector):
         decision = classify_signal_detailed(raw)
 
         if not self._delegation_enabled():
-            _emit_decision(decision=decision, should_launch=False, reason_code="delegation_disabled")
+            _emit_decision(
+                decision=decision,
+                should_launch=False,
+                reason_code="delegation_disabled",
+            )
             return False
         if self._bridge_is_running():
-            _emit_decision(decision=decision, should_launch=False, reason_code="bridge_already_running")
+            _emit_decision(
+                decision=decision,
+                should_launch=False,
+                reason_code="bridge_already_running",
+            )
             return False
         signal = decision["signal"]
         tier = decision["tier"]
         if signal == "browser":
             if tier == "C":
-                _emit_decision(decision=decision, should_launch=False, reason_code="tier_c_text_only")
+                _emit_decision(
+                    decision=decision,
+                    should_launch=False,
+                    reason_code="tier_c_text_only",
+                )
                 return False
-            _emit_decision(decision=decision, should_launch=True, reason_code="browser_signal")
+            _emit_decision(
+                decision=decision, should_launch=True, reason_code="browser_signal"
+            )
             return True
         # Keep the task-text fallback only for synthetic/demo flows where no
         # richer OpenCode event metadata exists yet.
@@ -764,10 +893,14 @@ class OpenCodeConnector(AdapterConnector):
             _emit_decision(
                 decision=decision,
                 should_launch=fallback,
-                reason_code="synthetic_task_fallback" if fallback else "synthetic_task_no_browser_need",
+                reason_code="synthetic_task_fallback"
+                if fallback
+                else "synthetic_task_no_browser_need",
             )
             return fallback
-        _emit_decision(decision=decision, should_launch=False, reason_code="no_browser_signal")
+        _emit_decision(
+            decision=decision, should_launch=False, reason_code="no_browser_signal"
+        )
         return False
 
     def _bridge_task_text(self, raw: dict[str, Any], task_text: str) -> str:
@@ -780,7 +913,9 @@ class OpenCodeConnector(AdapterConnector):
                 return value.strip()
         return task_text.strip()
 
-    def _bridge_context(self, raw: dict[str, Any], task_text: str, bridge_task_text: str) -> dict[str, Any]:
+    def _bridge_context(
+        self, raw: dict[str, Any], task_text: str, bridge_task_text: str
+    ) -> dict[str, Any]:
         meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
         output_preview = str(meta.get("output_preview") or "") if meta else ""
         return {
@@ -789,7 +924,9 @@ class OpenCodeConnector(AdapterConnector):
             "source_tool_name": str(meta.get("tool_name") or "") if meta else "",
             "source_tool_title": str(meta.get("tool_title") or "") if meta else "",
             "source_output_preview": output_preview[:500],
-            "source_summary_text": str(raw.get("summary") or raw.get("message") or "")[:500],
+            "source_summary_text": str(raw.get("summary") or raw.get("message") or "")[
+                :500
+            ],
             "source_task_text": task_text[:500],
             "bridge_task_text": bridge_task_text[:500],
             "tool_mode": str(meta.get("tool_mode") or ""),
@@ -860,7 +997,9 @@ class OpenCodeConnector(AdapterConnector):
                 "url": url,
                 "title": title,
                 "domain": domain,
-                "environment_type": "local" if domain in {"127.0.0.1", "localhost"} or domain.endswith(".local") else "external",
+                "environment_type": "local"
+                if domain in {"127.0.0.1", "localhost"} or domain.endswith(".local")
+                else "external",
                 "timestamp": self.runtime.timestamp(),
             }
         )
@@ -876,6 +1015,37 @@ class OpenCodeConnector(AdapterConnector):
         return parsed if isinstance(parsed, dict) else None
 
     def _normalize_opencode_event(self, raw: dict[str, Any]) -> dict[str, Any]:
+        def clean_raw_tool_call(text: str) -> str:
+            if not text:
+                return text
+            import re
+
+            match = re.match(r"^([a-zA-Z0-9_]+)\s*\((.*)\)$", text.strip())
+            if not match:
+                return text
+            func_name = match.group(1)
+            args_str = match.group(2)
+
+            target_match = re.search(
+                r"""(?:url|path|pattern|query)\s*=\s*(['"])(.*?)\1""", args_str
+            )
+            target = target_match.group(2) if target_match else args_str
+
+            action_map = {
+                "webfetch": "Fetching data from",
+                "read_file": "Reading file",
+                "run_bash": "Running command:",
+                "bash": "Running command:",
+                "search_code": "Searching code for",
+                "glob": "Searching for files:",
+                "grep": "Scanning code for",
+            }
+
+            action = action_map.get(
+                func_name, f"Executing {func_name.replace('_', ' ')} on"
+            )
+            return f"{action} {target}".strip()
+
         event_type = (
             raw.get("type")
             or raw.get("event")
@@ -883,6 +1053,9 @@ class OpenCodeConnector(AdapterConnector):
             or raw.get("event_type")
             or "tool_start"
         )
+
+        raw_tool_name = str(raw.get("meta", {}).get("tool_name") or "")
+
         summary = (
             raw.get("summary")
             or raw.get("message")
@@ -891,21 +1064,38 @@ class OpenCodeConnector(AdapterConnector):
             or self._error_message_for(raw)
             or str(event_type).replace(".", " ").replace("_", " ").title()
         )
-        state = raw.get("state") or raw.get("status") or ("done" if "complete" in str(event_type) else "thinking")
+
+        summary = clean_raw_tool_call(summary)
+
+        state = (
+            raw.get("state")
+            or raw.get("status")
+            or ("done" if "complete" in str(event_type) else "thinking")
+        )
+
+        if raw_tool_name in ("webfetch", "grep", "glob", "read_file"):
+            state = "reading"
+
         meta = {
             "opencode_event_type": event_type,
             "provider": "opencode",
             "raw_kind": raw.get("kind"),
             "web_mode": self.selected_web_mode,
+            "tool_name": raw_tool_name,
         }
         if self.selected_web_bridge is not None:
             meta["web_bridge"] = self.selected_web_bridge
+
+        mapped_action_type = self._map_event_type(
+            str(event_type), raw_tool_name=raw_tool_name
+        )
+
         return normalize_external_event(
             {
-                "event_type": self._map_event_type(str(event_type)),
+                "event_type": mapped_action_type,
                 "state": state,
                 "summary_text": summary,
-                "intent": raw.get("intent") or summary,
+                "intent": clean_raw_tool_call(str(raw.get("intent") or "")) or summary,
                 "risk_level": raw.get("risk_level", "none"),
                 "cursor": raw.get("cursor"),
                 "target_rect": raw.get("target_rect"),
@@ -913,7 +1103,9 @@ class OpenCodeConnector(AdapterConnector):
                 "subagent": bool(raw.get("subagent")),
                 "agent_id": raw.get("agent_id", "main_001"),
                 "parent_agent_id": raw.get("parent_agent_id"),
-                "source_event_id": raw.get("id") or raw.get("event_id") or new_id("src"),
+                "source_event_id": raw.get("id")
+                or raw.get("event_id")
+                or new_id("src"),
             },
             session_id=self.runtime.session_id,
             adapter_id=self.adapter_id,
@@ -921,19 +1113,35 @@ class OpenCodeConnector(AdapterConnector):
             event_seq=next(self.event_seq),
         )
 
-    def _map_event_type(self, event_type: str) -> str:
+    def _map_event_type(self, event_type: str, *, raw_tool_name: str = "") -> str:
         lowered = event_type.lower()
+        tool_lowered = raw_tool_name.lower()
+
+        if tool_lowered in ("webfetch", "grep", "glob", "read_file", "read"):
+            return "read"
+
         if "error" in lowered:
             return "error"
         if "complete" in lowered or "finished" in lowered:
             return "tool_complete"
-        if "navigate" in lowered or "open_url" in lowered or "open-url" in lowered or "visit" in lowered or "goto" in lowered:
+        if (
+            "navigate" in lowered
+            or "open_url" in lowered
+            or "open-url" in lowered
+            or "visit" in lowered
+            or "goto" in lowered
+        ):
             return "navigate"
         if "search" in lowered or "browser" in lowered or "web" in lowered:
             return "navigate"
         if "click" in lowered or "submit" in lowered or "tap" in lowered:
             return "click"
-        if "type" in lowered or "write" in lowered or "fill" in lowered or "input" in lowered:
+        if (
+            "type" in lowered
+            or "write" in lowered
+            or "fill" in lowered
+            or "input" in lowered
+        ):
             return "type"
         if "scroll" in lowered:
             return "scroll"
@@ -944,7 +1152,13 @@ class OpenCodeConnector(AdapterConnector):
         return "tool_start"
 
     def _is_error_event(self, raw: dict[str, Any]) -> bool:
-        event_type = str(raw.get("type") or raw.get("event") or raw.get("kind") or raw.get("event_type") or "")
+        event_type = str(
+            raw.get("type")
+            or raw.get("event")
+            or raw.get("kind")
+            or raw.get("event_type")
+            or ""
+        )
         return "error" in event_type.lower() or isinstance(raw.get("error"), dict)
 
     def _error_message_for(self, raw: dict[str, Any]) -> str | None:
@@ -968,37 +1182,105 @@ class OpenCodeConnector(AdapterConnector):
         if self.bridge_connector is not None:
             await self.bridge_connector.pause()
             return
-        await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode adapter does not support pause", command_type="pause")
+        await self.runtime.emit_error(
+            ErrorCode.INVALID_STATE,
+            "OpenCode adapter does not support pause",
+            command_type="pause",
+        )
 
     async def resume(self) -> None:
         if self.bridge_connector is not None:
             await self.bridge_connector.resume()
             return
-        await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode adapter does not support resume", command_type="resume")
+        await self.runtime.emit_error(
+            ErrorCode.INVALID_STATE,
+            "OpenCode adapter does not support resume",
+            command_type="resume",
+        )
 
     async def approve(self, checkpoint_id: str) -> bool:
         if self.bridge_connector is not None:
             return await self.bridge_connector.approve(checkpoint_id)
-        await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode adapter does not support approval checkpoints", command_type="approve", checkpoint_id=checkpoint_id)
+        await self.runtime.emit_error(
+            ErrorCode.INVALID_STATE,
+            "OpenCode adapter does not support approval checkpoints",
+            command_type="approve",
+            checkpoint_id=checkpoint_id,
+        )
         return False
 
     async def reject(self, checkpoint_id: str) -> bool:
         if self.bridge_connector is not None:
             return await self.bridge_connector.reject(checkpoint_id)
-        await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode adapter does not support approval checkpoints", command_type="reject", checkpoint_id=checkpoint_id)
+        await self.runtime.emit_error(
+            ErrorCode.INVALID_STATE,
+            "OpenCode adapter does not support approval checkpoints",
+            command_type="reject",
+            checkpoint_id=checkpoint_id,
+        )
         return False
 
     async def start_takeover(self) -> None:
         if self.bridge_connector is not None:
             await self.bridge_connector.start_takeover()
             return
-        await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode adapter does not support takeover", command_type="start_takeover")
+        await self.runtime.emit_error(
+            ErrorCode.INVALID_STATE,
+            "OpenCode adapter does not support takeover",
+            command_type="start_takeover",
+        )
 
     async def end_takeover(self) -> None:
         if self.bridge_connector is not None:
             await self.bridge_connector.end_takeover()
             return
-        await self.runtime.emit_error(ErrorCode.INVALID_STATE, "OpenCode adapter does not support takeover", command_type="end_takeover")
+        await self.runtime.emit_error(
+            ErrorCode.INVALID_STATE,
+            "OpenCode adapter does not support takeover",
+            command_type="end_takeover",
+        )
+
+    async def remote_mouse_move(self, x: float, y: float) -> None:
+        if self.bridge_connector is not None and hasattr(
+            self.bridge_connector, "remote_mouse_move"
+        ):
+            await self.bridge_connector.remote_mouse_move(x, y)
+
+    async def remote_mouse_down(self, x: float, y: float, button: str = "left") -> None:
+        if self.bridge_connector is not None and hasattr(
+            self.bridge_connector, "remote_mouse_down"
+        ):
+            await self.bridge_connector.remote_mouse_down(x, y, button)
+
+    async def remote_mouse_up(self, x: float, y: float, button: str = "left") -> None:
+        if self.bridge_connector is not None and hasattr(
+            self.bridge_connector, "remote_mouse_up"
+        ):
+            await self.bridge_connector.remote_mouse_up(x, y, button)
+
+    async def remote_click(self, x: float, y: float, button: str = "left") -> None:
+        if self.bridge_connector is not None and hasattr(
+            self.bridge_connector, "remote_click"
+        ):
+            await self.bridge_connector.remote_click(x, y, button)
+
+    async def remote_scroll(self, delta_x: float, delta_y: float) -> None:
+        if self.bridge_connector is not None and hasattr(
+            self.bridge_connector, "remote_scroll"
+        ):
+            await self.bridge_connector.remote_scroll(delta_x, delta_y)
+
+    async def remote_key_down(self, key: str) -> None:
+        if self.bridge_connector is not None and hasattr(
+            self.bridge_connector, "remote_key_down"
+        ):
+            await self.bridge_connector.remote_key_down(key)
+
+    async def remote_key_up(self, key: str) -> None:
+        if self.bridge_connector is not None and hasattr(
+            self.bridge_connector, "remote_key_up"
+        ):
+            await self.bridge_connector.remote_key_up(key)
 
     async def stop(self) -> None:
         await self._stop_bridge()
@@ -1013,7 +1295,9 @@ class OpenCodeConnector(AdapterConnector):
 
 
 class _BridgeRuntimeProxy:
-    def __init__(self, parent: OpenCodeConnector, bridge_id: WebBridgeId, task_text: str) -> None:
+    def __init__(
+        self, parent: OpenCodeConnector, bridge_id: WebBridgeId, task_text: str
+    ) -> None:
         self.parent = parent
         self.bridge_id = bridge_id
         self._task_text = task_text
@@ -1053,7 +1337,9 @@ class _BridgeRuntimeProxy:
 
     @property
     def latest_command_frame_generation(self) -> int:
-        return int(getattr(self.parent.runtime, "latest_command_frame_generation", 0) or 0)
+        return int(
+            getattr(self.parent.runtime, "latest_command_frame_generation", 0) or 0
+        )
 
     @property
     def latest_frame_seq(self) -> int | None:
@@ -1120,13 +1406,20 @@ class _BridgeRuntimeProxy:
     async def emit_session_state(self) -> None:
         await self.parent.runtime.emit_session_state()
 
-    async def transition_to(self, state: SessionState, checkpoint_id: str | None = None) -> None:
+    async def transition_to(
+        self, state: SessionState, checkpoint_id: str | None = None
+    ) -> None:
         if state == SessionState.STARTING:
             await self.parent.runtime.emit_session_state()
             return
         if state == SessionState.RUNNING:
-            if self.parent.runtime.state != SessionState.RUNNING or checkpoint_id is not None:
-                await self.parent.runtime.transition_to(SessionState.RUNNING, checkpoint_id=checkpoint_id)
+            if (
+                self.parent.runtime.state != SessionState.RUNNING
+                or checkpoint_id is not None
+            ):
+                await self.parent.runtime.transition_to(
+                    SessionState.RUNNING, checkpoint_id=checkpoint_id
+                )
             else:
                 await self.parent.runtime.emit_session_state()
             return
@@ -1160,11 +1453,19 @@ class SessionRuntimeProtocol:
     async def emit_background_worker_update(self, payload: dict[str, Any]) -> None: ...
     async def emit_approval_required(self, payload: dict[str, Any]) -> None: ...
     async def emit_bridge_offer(self, payload: dict[str, Any]) -> None: ...
-    async def emit_error(self, code: ErrorCode, message: str, command_type: str | None = None, checkpoint_id: str | None = None) -> None: ...
+    async def emit_error(
+        self,
+        code: ErrorCode,
+        message: str,
+        command_type: str | None = None,
+        checkpoint_id: str | None = None,
+    ) -> None: ...
     async def emit_frame(self, payload: dict[str, Any]) -> None: ...
     async def emit_browser_context_update(self, payload: dict[str, Any]) -> None: ...
     async def emit_session_state(self) -> None: ...
-    async def transition_to(self, state: SessionState, checkpoint_id: str | None = None) -> None: ...
+    async def transition_to(
+        self, state: SessionState, checkpoint_id: str | None = None
+    ) -> None: ...
     async def complete_task(self, status: str, summary_text: str) -> None: ...
     def emit_routing_decision(self, payload: dict[str, Any]) -> None: ...
     def timestamp(self) -> str: ...

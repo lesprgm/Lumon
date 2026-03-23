@@ -17,7 +17,15 @@ from app.browser.actions import BrowserActionLayer
 from app.browser.demo_pages import backup_demo_html, primary_demo_html
 from app.browser.screencast import CDPScreencastStreamer, ScreenshotPollStreamer
 from app.config import DEFAULT_ADAPTER_ID, VIEWPORT_HEIGHT, VIEWPORT_WIDTH
-from app.protocol.enums import ErrorCode, RiskLevel, SessionState, ActionType, AgentKind, VisibilityMode, AgentRuntimeState
+from app.protocol.enums import (
+    ErrorCode,
+    RiskLevel,
+    SessionState,
+    ActionType,
+    AgentKind,
+    VisibilityMode,
+    AgentRuntimeState,
+)
 from app.protocol.models import (
     BrowserCommandRecord,
     BrowserCommandRequest,
@@ -25,6 +33,7 @@ from app.protocol.models import (
     BrowserElementRef,
     BrowserEvidence,
 )
+from app.streaming.stream_profile import StreamProfileConfig, resolve_stream_profile
 from app.utils.ids import new_id
 
 try:
@@ -50,6 +59,107 @@ COMMAND_READY_TIMEOUT_SECONDS = float(
 )
 
 
+def _normalize_command_label(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _selector_attribute(selector: str, attribute: str) -> str | None:
+    quoted_match = re.search(
+        rf"{re.escape(attribute)}\s*=\s*(['\"])(.*?)\1",
+        selector,
+        re.IGNORECASE,
+    )
+    if quoted_match:
+        return quoted_match.group(2)
+
+    bare_match = re.search(
+        rf"{re.escape(attribute)}\s*=\s*([^\]\s]+)",
+        selector,
+        re.IGNORECASE,
+    )
+    if bare_match:
+        return bare_match.group(1)
+
+    return None
+
+
+def _selector_hash_id(selector: str) -> str | None:
+    match = re.search(r"#([A-Za-z_][\w-]*)", selector)
+    return match.group(1) if match else None
+
+
+def _humanize_selector_token(value: str) -> str:
+    token = urllib.parse.unquote_plus(value).strip().strip("'\"")
+    token = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", token)
+    token = token.replace("_", " ").replace("-", " ")
+    return _normalize_command_label(token).lower()
+
+
+def _friendly_selector_label(selector: str) -> str:
+    normalized_selector = selector.strip()
+    tag_match = re.match(r"([a-zA-Z][\w-]*)", normalized_selector)
+    tag = tag_match.group(1).lower() if tag_match else ""
+    input_type = (_selector_attribute(normalized_selector, "type") or "").lower()
+    candidate = next(
+        (
+            value
+            for value in (
+                _selector_attribute(normalized_selector, "aria-label"),
+                _selector_attribute(normalized_selector, "placeholder"),
+                _selector_attribute(normalized_selector, "name"),
+                _selector_hash_id(normalized_selector),
+            )
+            if value
+        ),
+        None,
+    )
+    primary = _humanize_selector_token(candidate) if candidate else ""
+
+    if tag == "button" or input_type in {"button", "submit"}:
+        return primary or "button"
+    if tag == "textarea":
+        if primary:
+            return (
+                primary
+                if primary.endswith(("field", "box", "area"))
+                else f"{primary} field"
+            )
+        return "text area"
+    if tag == "select":
+        if primary:
+            return primary if primary.endswith("menu") else f"{primary} menu"
+        return "menu"
+    if tag in {"input", ""}:
+        if input_type == "search" or primary in {"search", "search input"}:
+            return "search box"
+        if input_type == "email" or primary == "email":
+            return "email field"
+        if input_type == "password":
+            return "password field"
+        if primary:
+            return (
+                primary
+                if primary.endswith(("field", "box", "button", "menu", "link"))
+                else f"{primary} field"
+            )
+        return "field"
+    if tag == "a":
+        return primary or "link"
+    return primary or "element"
+
+
+def _command_target_label(target: dict[str, Any]) -> str:
+    selector = str(target.get("selector") or "")
+    raw_label = _normalize_command_label(str(target.get("label") or ""))
+    fallback_label = _friendly_selector_label(selector) if selector else "element"
+
+    if not raw_label:
+        return fallback_label
+    if raw_label == _normalize_command_label(selector):
+        return fallback_label
+    return raw_label
+
+
 class PlaywrightNativeConnector(AdapterConnector):
     adapter_id = DEFAULT_ADAPTER_ID
     capabilities = {
@@ -72,6 +182,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.resume_event.set()
         self.suspended_checkpoint_id: str | None = None
         self.latest_checkpoint_id: str | None = None
+        self.resume_state_after_takeover: SessionState = SessionState.RUNNING
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
@@ -81,6 +192,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.live_stream_health_task: asyncio.Task[None] | None = None
         self.option_a_streamer: ScreenshotPollStreamer | None = None
         self.stream_mode: StreamMode = self._configured_stream_mode()
+        self.stream_profile: StreamProfileConfig = resolve_stream_profile(None)
         self.webrtc_primary = self._configured_webrtc_primary()
         self.demo_variant: DemoVariant = self._configured_demo_variant()
         self.action_layer: BrowserActionLayer | None = None
@@ -124,6 +236,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.command_inflight_id = None
         self.latest_checkpoint_id = None
         self.suspended_checkpoint_id = None
+        self.resume_state_after_takeover = SessionState.RUNNING
         self.command_delegate_error = None
         self.page_version = 0
         self.current_page_url = None
@@ -280,6 +393,20 @@ class PlaywrightNativeConnector(AdapterConnector):
         command_key: str,
         approval_granted: bool,
     ) -> dict[str, Any]:
+        if request.command in {"open", "type"}:
+            print(
+                (
+                    "[lumon] browser_command_begin "
+                    f"command={request.command} "
+                    f"command_id={request.command_id} "
+                    f"page_version={self.page_version} "
+                    f"current_url={self.current_page_url!r} "
+                    f"element_id={request.element_id!r} "
+                    f"text_len={len(request.text or '')}"
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
         if not self._bridge_is_alive():
             result = self._result(
                 request,
@@ -289,6 +416,7 @@ class PlaywrightNativeConnector(AdapterConnector):
             )
             self.command_results[command_key] = result
             self._record_command_artifact(result)
+            self._log_command_result(request, result, phase="bridge_unavailable")
             return result
         try:
             await asyncio.wait_for(
@@ -303,6 +431,7 @@ class PlaywrightNativeConnector(AdapterConnector):
             )
             self.command_results[command_key] = result
             self._record_command_artifact(result)
+            self._log_command_result(request, result, phase="delegate_ready_timeout")
             return result
         await self._maybe_switch_to_foreground_page()
         try:
@@ -337,6 +466,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         else:
             self.command_results[command_key] = result
         self._record_command_artifact(result)
+        self._log_command_result(request, result, phase="completed")
         return result
 
     async def _execute_browser_command(
@@ -344,7 +474,10 @@ class PlaywrightNativeConnector(AdapterConnector):
     ) -> dict[str, Any]:
         if self.action_layer is not None:
             action_map = {
-                "begin_task": (ActionType.NAVIGATE, "Preparing task and starting navigation"),
+                "begin_task": (
+                    ActionType.NAVIGATE,
+                    "Preparing task and starting navigation",
+                ),
                 "status": (ActionType.READ, "Checking page status"),
                 "inspect": (ActionType.READ, "Inspecting page elements"),
                 "open": (ActionType.NAVIGATE, f"Opening {request.url or 'page'}"),
@@ -356,11 +489,27 @@ class PlaywrightNativeConnector(AdapterConnector):
                 cursor = None
                 target_rect = None
                 if request.command == "wait" and request.wait_for_selector:
-                    cursor, target_rect, _ = await self.action_layer._target_for_selector(request.wait_for_selector)
+                    (
+                        cursor,
+                        target_rect,
+                        _,
+                    ) = await self.action_layer._target_for_selector(
+                        request.wait_for_selector
+                    )
                 await self.action_layer._emit_event(
-                    agent_id="main_001", agent_kind=AgentKind.MAIN, visibility_mode=VisibilityMode.FOREGROUND,
-                    action_type=action_type, state=AgentRuntimeState.THINKING if action_type == ActionType.COMPLETE else getattr(AgentRuntimeState, action_type.name, AgentRuntimeState.THINKING),
-                    summary_text=summary_text, intent=f"Execute {request.command} command", cursor=cursor, target_rect=target_rect,
+                    agent_id="main_001",
+                    agent_kind=AgentKind.MAIN,
+                    visibility_mode=VisibilityMode.FOREGROUND,
+                    action_type=action_type,
+                    state=AgentRuntimeState.THINKING
+                    if action_type == ActionType.COMPLETE
+                    else getattr(
+                        AgentRuntimeState, action_type.name, AgentRuntimeState.THINKING
+                    ),
+                    summary_text=summary_text,
+                    intent=f"Execute {request.command} command",
+                    cursor=cursor,
+                    target_rect=target_rect,
                 )
 
         if request.command == "begin_task":
@@ -376,13 +525,16 @@ class PlaywrightNativeConnector(AdapterConnector):
                 )
             if request.task_text:
                 self.runtime.task_text = request.task_text
-            inferred_url = self._infer_url_from_task_text(request.task_text)
+            inferred_url = str(
+                request.url or ""
+            ).strip() or self._infer_url_from_task_text(request.task_text)
             if inferred_url:
                 assert self.action_layer is not None
                 await self.action_layer.navigate(
                     inferred_url,
                     summary_text=f"Opening {inferred_url}",
                     intent=f"Open {inferred_url}",
+                    fast=True,
                 )
                 self.last_begin_task_open_url = inferred_url
                 self.last_begin_task_opened_at = time.monotonic()
@@ -469,10 +621,17 @@ class PlaywrightNativeConnector(AdapterConnector):
         if request.command == "open":
             assert self.action_layer is not None
             requested_url = request.url or ""
+            normalized_requested_url = self._normalized_url_for_dedupe(requested_url)
+            normalized_current_url = self._normalized_url_for_dedupe(
+                self.current_page_url
+            )
+            normalized_begin_task_url = self._normalized_url_for_dedupe(
+                self.last_begin_task_open_url
+            )
             skip_navigation = (
-                bool(requested_url)
-                and requested_url == self.current_page_url
-                and requested_url == self.last_begin_task_open_url
+                bool(normalized_requested_url)
+                and normalized_requested_url == normalized_current_url
+                and normalized_requested_url == normalized_begin_task_url
                 and (time.monotonic() - self.last_begin_task_opened_at) <= 15.0
             )
             if not skip_navigation:
@@ -656,14 +815,17 @@ class PlaywrightNativeConnector(AdapterConnector):
                     reason="stale_target" if request.element_id else "target_not_found",
                 )
             if target["page_version"] != self.page_version:
-                return self._result(
-                    request,
-                    status="failed",
-                    summary_text="That page target is stale. Inspect the page again before acting.",
-                    reason="stale_target",
-                    source_url=self.current_page_url,
-                    page_version=self.page_version,
-                )
+                recovered_target = await self._recover_stale_target(request, target)
+                if recovered_target is None:
+                    return self._result(
+                        request,
+                        status="failed",
+                        summary_text="That page target is stale. Inspect the page again before acting.",
+                        reason="stale_target",
+                        source_url=self.current_page_url,
+                        page_version=self.page_version,
+                    )
+                target = recovered_target
 
             unsupported_reason = self._unsupported_command_reason(
                 request, target=target
@@ -692,19 +854,20 @@ class PlaywrightNativeConnector(AdapterConnector):
 
             assert self.action_layer is not None
             before_url = self.current_page_url or ""
+            target_label = _command_target_label(target)
             if request.command == "click":
                 outcome = await self.action_layer.click(
                     target["selector"],
-                    f"Clicking {target['label']}",
-                    f"Click {target['label']}",
+                    f"Clicking {target_label}",
+                    f"Click {target_label}",
                     risky=False,
                 )
             else:
                 outcome = await self.action_layer.type_text(
                     target["selector"],
                     request.text or "",
-                    f"Typing into {target['label']}",
-                    f"Type into {target['label']}",
+                    f"Typing into {target_label}",
+                    f"Type into {target_label}",
                     masked=bool(target.get("sensitive", False)),
                 )
             await self._sync_page_version(force=False)
@@ -718,6 +881,7 @@ class PlaywrightNativeConnector(AdapterConnector):
             sensitive_target = bool(target.get("sensitive", False))
             verified = False
             reason: str | None = None
+            retry_applied = False
             if request.command == "click":
                 verified = bool(url_changed or focus_changed or frame_emitted)
                 if not verified:
@@ -725,7 +889,25 @@ class PlaywrightNativeConnector(AdapterConnector):
             else:
                 verified = value_after == (request.text or "")
                 if not verified:
-                    reason = "value_mismatch"
+                    retry_value = await self._retry_type_value(
+                        str(target.get("selector") or ""), request.text or ""
+                    )
+                    if retry_value is not None:
+                        retry_applied = True
+                        value_after = retry_value
+                        outcome["value_after_retry"] = retry_value
+                        verified = value_after == (request.text or "")
+                        if verified:
+                            await self._sync_page_version(force=False)
+                            (
+                                retry_frame_emitted,
+                                retry_keyframe_path,
+                            ) = await self._capture_command_frame("command_type_retry")
+                            frame_emitted = frame_emitted or retry_frame_emitted
+                            keyframe_path = retry_keyframe_path or keyframe_path
+                            context = await self._browser_status_context()
+                    if not verified:
+                        reason = "value_mismatch"
             evidence = BrowserEvidence(
                 verified=verified,
                 final_url=context["url"],
@@ -741,6 +923,7 @@ class PlaywrightNativeConnector(AdapterConnector):
                 url_changed=url_changed,
                 details={
                     **outcome,
+                    "retry_applied": retry_applied,
                     "value_after": None if sensitive_target else value_after,
                 },
             ).model_dump(mode="json")
@@ -748,9 +931,9 @@ class PlaywrightNativeConnector(AdapterConnector):
                 request,
                 status="success" if verified else "partial",
                 summary_text=(
-                    f"Clicked {target['label']}."
+                    f"Clicked {target_label}."
                     if request.command == "click"
-                    else f"Typed into {target['label']}."
+                    else f"Typed into {target_label}."
                 ),
                 reason=reason,
                 evidence=evidence,
@@ -922,11 +1105,19 @@ class PlaywrightNativeConnector(AdapterConnector):
                 status="stopped", summary_text="Backup shortlist rejected"
             )
 
+    def _get_frame_emitted_event(self) -> asyncio.Event | None:
+        if self.stream_mode == "option_a" and self.option_a_streamer is not None:
+            return self.option_a_streamer.frame_emitted_event
+        if self.live_streamer is not None:
+            return self.live_streamer.frame_emitted_event
+        return None
+
     async def _adopt_page(self, page: Page) -> None:
         if self.context is None:
             return
         if self.page is page:
             return
+        self._bind_page_lifecycle(page)
         self.page = page
         if self.action_layer is not None:
             self.action_layer.page = page
@@ -938,7 +1129,9 @@ class PlaywrightNativeConnector(AdapterConnector):
             if self.option_a_streamer is not None:
                 await self.option_a_streamer.stop()
             self.option_a_streamer = ScreenshotPollStreamer(
-                page, self.runtime.emit_frame
+                page,
+                self.runtime.emit_frame,
+                profile_config=self.stream_profile,
             )
             await self.option_a_streamer.start()
         else:
@@ -949,7 +1142,9 @@ class PlaywrightNativeConnector(AdapterConnector):
                 await self.live_streamer.stop()
             self.cdp_session = await self.context.new_cdp_session(page)
             self.live_streamer = CDPScreencastStreamer(
-                self.cdp_session, self.runtime.emit_frame
+                self.cdp_session,
+                self.runtime.emit_frame,
+                profile_config=self.stream_profile,
             )
             await self.live_streamer.start()
             asyncio.create_task(self._watch_live_stream_health())
@@ -966,6 +1161,24 @@ class PlaywrightNativeConnector(AdapterConnector):
         latest_page = pages[-1]
         if latest_page is not self.page:
             await self._adopt_page(latest_page)
+
+    def _bind_page_lifecycle(self, page: Page) -> None:
+        with contextlib.suppress(Exception):
+            page.on(
+                "close",
+                lambda: self._log_runtime_event(
+                    "page_closed",
+                    page_version=self.page_version,
+                    current_url=self.current_page_url,
+                    runtime_state=self.runtime.state.value,
+                ),
+            )
+
+    def _log_runtime_event(self, event: str, **fields: Any) -> None:
+        parts = [f"[lumon] {event}"]
+        for key, value in fields.items():
+            parts.append(f"{key}={value!r}")
+        print(" ".join(parts), file=sys.stderr, flush=True)
 
     async def _sync_page_version(self, *, force: bool) -> bool:
         await self._maybe_switch_to_foreground_page()
@@ -1096,6 +1309,14 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.last_begin_task_open_url = None
         self.last_begin_task_opened_at = 0.0
 
+    async def set_stream_profile(self, profile_name: str | None) -> None:
+        next_profile = resolve_stream_profile(profile_name)
+        if next_profile == self.stream_profile:
+            return
+        self.stream_profile = next_profile
+        if self.page is not None:
+            await self._start_stream_transport()
+
     def _infer_url_from_task_text(self, task_text: str | None) -> str | None:
         if not task_text:
             return None
@@ -1161,7 +1382,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         if request.selector:
             return {
                 "element_id": request.selector,
-                "label": request.selector,
+                "label": _friendly_selector_label(request.selector),
                 "role": "selector",
                 "selector": request.selector,
                 "typeable": True,
@@ -1171,6 +1392,52 @@ class PlaywrightNativeConnector(AdapterConnector):
                 "bbox": None,
                 "sensitive": False,
             }
+        return None
+
+    async def _recover_stale_target(
+        self, request: BrowserCommandRequest, target: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        selector = str(target.get("selector") or "")
+        if (
+            request.command not in {"click", "type"}
+            or not selector
+            or self.page is None
+        ):
+            return None
+        locator = self.page.locator(selector).first
+        try:
+            box = await asyncio.wait_for(locator.bounding_box(), timeout=0.8)
+        except Exception:
+            return None
+        if box is None:
+            return None
+        return {
+            **target,
+            "page_version": self.page_version,
+            "bbox": {
+                "x": int(round(box["x"])),
+                "y": int(round(box["y"])),
+                "width": int(round(box["width"])),
+                "height": int(round(box["height"])),
+            },
+        }
+
+    async def _retry_type_value(self, selector: str, expected: str) -> str | None:
+        if self.page is None or not selector:
+            return None
+        locator = self.page.locator(selector).first
+        try:
+            await asyncio.wait_for(locator.fill(expected), timeout=1.5)
+        except Exception:
+            return None
+        with contextlib.suppress(Exception):
+            return await asyncio.wait_for(locator.input_value(), timeout=1.0)
+        with contextlib.suppress(Exception):
+            value = await self.page.evaluate(
+                "(selector) => document.querySelector(selector)?.value ?? null",
+                selector,
+            )
+            return value if isinstance(value, str) else None
         return None
 
     def _unsupported_command_reason(
@@ -1276,6 +1543,30 @@ class PlaywrightNativeConnector(AdapterConnector):
             flush=True,
         )
         traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+
+    def _log_command_result(
+        self, request: BrowserCommandRequest, result: dict[str, Any], *, phase: str
+    ) -> None:
+        if request.command not in {"open", "type"}:
+            return
+        evidence = result.get("evidence") or {}
+        details = evidence.get("details") if isinstance(evidence, dict) else None
+        target_rect = details.get("target_rect") if isinstance(details, dict) else None
+        print(
+            (
+                "[lumon] browser_command_phase "
+                f"phase={phase} "
+                f"command={request.command} "
+                f"command_id={request.command_id} "
+                f"status={result.get('status')} "
+                f"reason={result.get('reason')} "
+                f"verified={evidence.get('verified') if isinstance(evidence, dict) else None} "
+                f"target_rect={target_rect!r} "
+                f"source_url={result.get('source_url')!r}"
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
 
     async def _blocked_for_approval(
         self,
@@ -1400,24 +1691,59 @@ class PlaywrightNativeConnector(AdapterConnector):
             meta=meta or {},
         ).model_dump(mode="json")
 
+    @staticmethod
+    def _normalized_url_for_dedupe(url: str | None) -> str | None:
+        if not url:
+            return None
+        parsed = urllib.parse.urlsplit(str(url))
+        if not parsed.scheme or not parsed.netloc:
+            return str(url)
+        path = parsed.path or ""
+        if path == "/":
+            path = ""
+        return urllib.parse.urlunsplit(
+            (
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
+                path,
+                parsed.query,
+                "",
+            )
+        )
+
     async def _launch_browser(self) -> None:
         if async_playwright is None:  # pragma: no cover
             raise RuntimeError("Playwright is not installed")
         headless = os.getenv("LUMON_HEADLESS", "1") != "0"
-        scale_factor_raw = os.getenv("LUMON_DEVICE_SCALE_FACTOR", "1")
-        try:
-            scale_factor = float(scale_factor_raw)
-        except ValueError:
-            scale_factor = 1.0
-        if scale_factor <= 0:
-            scale_factor = 1.0
+        scale_factor = self._resolve_device_scale_factor()
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=headless)
         self.context = await self.browser.new_context(
             viewport={"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
             device_scale_factor=scale_factor,
         )
+        with contextlib.suppress(Exception):
+            self.context.on(
+                "close",
+                lambda: self._log_runtime_event(
+                    "context_closed",
+                    page_version=self.page_version,
+                    current_url=self.current_page_url,
+                    runtime_state=self.runtime.state.value,
+                ),
+            )
         self.page = await self.context.new_page()
+        self._bind_page_lifecycle(self.page)
+        with contextlib.suppress(Exception):
+            self.browser.on(
+                "disconnected",
+                lambda: self._log_runtime_event(
+                    "browser_disconnected",
+                    page_version=self.page_version,
+                    current_url=self.current_page_url,
+                    runtime_state=self.runtime.state.value,
+                ),
+            )
         with contextlib.suppress(Exception):
             self.context.on(
                 "page", lambda page: asyncio.create_task(self._adopt_page(page))
@@ -1433,6 +1759,7 @@ class PlaywrightNativeConnector(AdapterConnector):
             emit_browser_context=self.runtime.emit_browser_context_update,
             event_seq_supplier=lambda: next(self.event_seq),
             gate_check=self._wait_for_run_permission,
+            frame_sync=self._get_frame_emitted_event,
         )
         await self._sync_page_version(force=True)
 
@@ -1443,17 +1770,10 @@ class PlaywrightNativeConnector(AdapterConnector):
             if self.live_streamer is not None:
                 await self.live_streamer.stop()
                 self.live_streamer = None
-            interval_raw = os.getenv("LUMON_SCREENSHOT_INTERVAL_SECONDS", "0.2")
-            try:
-                interval_seconds = float(interval_raw)
-            except ValueError:
-                interval_seconds = 0.2
-            if interval_seconds <= 0:
-                interval_seconds = 0.2
             self.option_a_streamer = ScreenshotPollStreamer(
                 self.page,
                 self.runtime.emit_frame,
-                interval_seconds=interval_seconds,
+                profile_config=self.stream_profile,
             )
             await self.option_a_streamer.start()
             return
@@ -1463,7 +1783,9 @@ class PlaywrightNativeConnector(AdapterConnector):
             self.option_a_streamer = None
         assert self.cdp_session is not None
         self.live_streamer = CDPScreencastStreamer(
-            self.cdp_session, self.runtime.emit_frame
+            self.cdp_session,
+            self.runtime.emit_frame,
+            profile_config=self.stream_profile,
         )
         await self.live_streamer.start()
         self.live_stream_health_task = asyncio.create_task(
@@ -1486,7 +1808,9 @@ class PlaywrightNativeConnector(AdapterConnector):
         if self.page is None:
             return
         self.option_a_streamer = ScreenshotPollStreamer(
-            self.page, self.runtime.emit_frame
+            self.page,
+            self.runtime.emit_frame,
+            profile_config=self.stream_profile,
         )
         await self.option_a_streamer.start()
 
@@ -1747,6 +2071,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         if self.runtime.state == SessionState.TAKEOVER:
             await self.runtime.emit_session_state()
             return
+        current_state = self.runtime.state
         if self.runtime.state not in {
             SessionState.RUNNING,
             SessionState.PAUSE_REQUESTED,
@@ -1759,6 +2084,19 @@ class PlaywrightNativeConnector(AdapterConnector):
                 command_type="start_takeover",
             )
             return
+        self.resume_state_after_takeover = (
+            SessionState.RUNNING
+            if current_state
+            in {SessionState.RUNNING, SessionState.WAITING_FOR_APPROVAL}
+            else SessionState.PAUSED
+        )
+        self._log_runtime_event(
+            "takeover_start",
+            from_state=current_state.value,
+            resume_state=self.resume_state_after_takeover.value,
+            checkpoint_id=self.latest_checkpoint_id,
+            current_url=self.current_page_url,
+        )
         if self.runtime.state == SessionState.WAITING_FOR_APPROVAL:
             self.suspended_checkpoint_id = self.latest_checkpoint_id
             if self.approval_future and not self.approval_future.done():
@@ -1776,9 +2114,19 @@ class PlaywrightNativeConnector(AdapterConnector):
             )
             return
         stale_checkpoint_id = self.suspended_checkpoint_id
+        target_state = self.resume_state_after_takeover
         self.suspended_checkpoint_id = None
         self.latest_checkpoint_id = None
-        await self.runtime.transition_to(SessionState.PAUSED, checkpoint_id=None)
+        self.resume_state_after_takeover = SessionState.RUNNING
+        self._log_runtime_event(
+            "takeover_end",
+            to_state=target_state.value,
+            stale_checkpoint_id=stale_checkpoint_id,
+            current_url=self.current_page_url,
+        )
+        await self.runtime.transition_to(target_state, checkpoint_id=None)
+        if target_state == SessionState.RUNNING:
+            self.resume_event.set()
         if stale_checkpoint_id:
             await self.runtime.emit_error(
                 ErrorCode.CHECKPOINT_STALE,
@@ -1823,6 +2171,16 @@ class PlaywrightNativeConnector(AdapterConnector):
     def _configured_stream_mode(self) -> StreamMode:
         mode = os.getenv("LUMON_STREAM_MODE", "live").lower()
         return "option_a" if mode == "option_a" else "live"
+
+    def _resolve_device_scale_factor(self) -> float:
+        if self.stream_profile.device_scale_factor is not None:
+            return self.stream_profile.device_scale_factor
+        scale_factor_raw = os.getenv("LUMON_DEVICE_SCALE_FACTOR", "1")
+        try:
+            scale_factor = float(scale_factor_raw)
+        except ValueError:
+            scale_factor = 1.0
+        return scale_factor if scale_factor > 0 else 1.0
 
     def _configured_webrtc_primary(self) -> bool:
         value = os.getenv("LUMON_WEBRTC_PRIMARY")

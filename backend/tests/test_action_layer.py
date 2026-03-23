@@ -23,7 +23,7 @@ class FakeLocator:
     async def bounding_box(self) -> dict[str, float] | None:
         return self._box
 
-    async def click(self) -> None:
+    async def click(self, **kwargs) -> None:
         self.clicked = True
 
     async def fill(self, value: str) -> None:
@@ -131,7 +131,7 @@ async def test_click_falls_back_when_target_box_missing() -> None:
 
     await layer.click("#missing", "Clicking fallback target", "Attempt fallback click")
 
-    assert events[0]["cursor"] == {"x": 640, "y": 400}
+    assert events[0]["cursor"] == {"x": 960, "y": 540}
     assert events[0]["target_rect"] is None
     assert events[0]["meta"]["fallback_cursor"] is True
     assert page.locator("#missing").clicked is True
@@ -159,8 +159,8 @@ async def test_target_box_is_clamped_to_viewport() -> None:
         "#offscreen", "Inspecting offscreen region", "Clamp the selection"
     )
 
-    assert events[0]["target_rect"] == {"x": 0, "y": 790, "width": 1280, "height": 50}
-    assert events[0]["cursor"] == {"x": 640, "y": 800}
+    assert events[0]["target_rect"] == {"x": 0, "y": 790, "width": 1920, "height": 50}
+    assert events[0]["cursor"] == {"x": 960, "y": 815}
 
 
 @pytest.mark.asyncio
@@ -189,7 +189,7 @@ async def test_target_resolution_timeout_falls_back_quickly(
     )
 
     assert events[0]["target_rect"] is None
-    assert events[0]["cursor"] == {"x": 640, "y": 400}
+    assert events[0]["cursor"] == {"x": 960, "y": 540}
     assert events[0]["meta"]["fallback_cursor"] is True
     assert events[0]["meta"]["target_resolution_error"] == "timeout"
 
@@ -235,6 +235,40 @@ def test_normalize_external_event_defaults_unknown_values() -> None:
     assert normalized["state"] == "thinking"
     assert normalized["summary_text"] == "Adapter fallback label"
     assert normalized["risk_level"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_fast_navigate_uses_domcontentloaded_and_skips_visual_waits() -> None:
+    events: list[dict] = []
+    page = FakePage()
+    wait_calls = 0
+    layer = BrowserActionLayer(
+        session_id="sess_1",
+        adapter_id="playwright_native",
+        adapter_run_id="run_1",
+        page=page,
+        emit_event=lambda payload: _append(events, payload),
+        emit_worker_update=lambda payload: _append([], payload),
+        event_seq_supplier=iter(range(1, 100)).__next__,
+        gate_check=lambda: asyncio.sleep(0),
+    )
+
+    async def fake_wait_for_frame() -> None:
+        nonlocal wait_calls
+        wait_calls += 1
+
+    layer._wait_for_frame = fake_wait_for_frame  # type: ignore[assignment]
+
+    await layer.navigate(
+        "https://example.com",
+        summary_text="Opening quickly",
+        intent="Open quickly",
+        fast=True,
+    )
+
+    assert page.last_goto == "https://example.com|domcontentloaded"
+    assert events[0]["meta"]["fast"] is True
+    assert wait_calls == 0
 
 
 async def _append(collection: list[dict], payload: dict) -> None:

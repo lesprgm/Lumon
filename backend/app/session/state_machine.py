@@ -35,7 +35,12 @@ ALLOWED_TRANSITIONS: dict[SessionState, set[SessionState]] = {
         SessionState.STOPPED,
         SessionState.FAILED,
     },
-    SessionState.TAKEOVER: {SessionState.PAUSED, SessionState.FAILED, SessionState.STOPPED},
+    SessionState.TAKEOVER: {
+        SessionState.RUNNING,
+        SessionState.PAUSED,
+        SessionState.FAILED,
+        SessionState.STOPPED,
+    },
     SessionState.COMPLETED: set(),
     SessionState.FAILED: set(),
     SessionState.STOPPED: set(),

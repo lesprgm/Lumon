@@ -5,9 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 import app.session.manager as session_manager
+from app.config import RUNTIME_VERSION
 from app.protocol.enums import SessionState
 from app.protocol.models import BrowserCommandRecord, LocalObserveOpenCodeRequest
 from app.session.manager import SessionManager, SessionRuntime
+from starlette.websockets import WebSocketState
 
 
 @pytest.mark.asyncio
@@ -80,7 +82,120 @@ async def test_reconnect_within_grace_prevents_stop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_command_mode_approval_does_not_resolve_active_intervention() -> None:
+async def test_runtime_connect_tracks_reconnects_without_seeding_open_request() -> None:
+    runtime = SessionRuntime(disconnect_grace_seconds=0)
+    runtime.state = SessionState.RUNNING
+
+    class DummySocket:
+        application_state = SimpleNamespace(name="CONNECTED")
+
+        def __init__(self) -> None:
+            self.accepted = False
+            self.sent: list[dict] = []
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+
+    first_socket = DummySocket()
+    second_socket = DummySocket()
+
+    await runtime.connect(first_socket)  # type: ignore[arg-type]
+    assert runtime._artifact.metrics.ui_open_requested_at is None
+    assert runtime._artifact.metrics.reconnect_count == 0
+
+    await runtime.disconnect(first_socket)  # type: ignore[arg-type]
+    await asyncio.sleep(0.02)
+    await runtime.connect(second_socket)  # type: ignore[arg-type]
+
+    assert runtime._artifact.metrics.ui_open_requested_at is None
+    assert runtime._artifact.metrics.reconnect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_broadcast_tolerates_connection_set_mutation_during_send() -> None:
+    runtime = SessionRuntime()
+    runtime.state = SessionState.RUNNING
+
+    class MutatingSocket:
+        application_state = WebSocketState.CONNECTED
+
+        def __init__(self, runtime: SessionRuntime) -> None:
+            self.runtime = runtime
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+            self.runtime._connections.discard(self)  # type: ignore[arg-type]
+
+    socket = MutatingSocket(runtime)
+    runtime._connections.add(socket)  # type: ignore[arg-type]
+
+    await runtime.emit_session_state()
+
+    assert len(socket.sent) == 1
+    assert socket not in runtime._connections
+
+
+@pytest.mark.asyncio
+async def test_ui_ready_emits_error_when_frontend_runtime_is_stale() -> None:
+    runtime = SessionRuntime()
+    messages: list[dict] = []
+    runtime.broadcast = _capture_broadcast(messages)  # type: ignore[assignment]
+
+    await runtime.handle_client_message(
+        {
+            "type": "ui_ready",
+            "payload": {
+                "ready": True,
+                "runtime_version": "stale-frontend-build",
+                "supports_ui_telemetry": False,
+                "supports_ui_ready_handshake": False,
+            },
+        }
+    )
+
+    assert runtime._artifact.metrics.ui_ready_at is not None
+    assert runtime._artifact.events[-1]["type"] == "ui_handshake"
+    assert (
+        runtime._artifact.events[-1]["payload"]["expected_runtime_version"]
+        == RUNTIME_VERSION
+    )
+    assert messages[-1]["type"] == "error"
+    assert "frontend build is stale" in messages[-1]["payload"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_stale_websocket_with_policy_close() -> None:
+    manager = SessionManager(allowed_origins=("http://127.0.0.1:8000",))
+
+    class RejectSocket:
+        def __init__(self) -> None:
+            self.headers = {"origin": "http://127.0.0.1:8000"}
+            self.query_params = {"session_id": "sess_missing", "token": "ws_missing"}
+            self.accepted = False
+            self.closed: tuple[int, str] | None = None
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def close(self, code: int, reason: str) -> None:
+            self.closed = (code, reason)
+
+    socket = RejectSocket()
+    await manager.connect(socket)  # type: ignore[arg-type]
+
+    assert socket.accepted is True
+    assert socket.closed is not None
+    assert socket.closed[0] == 1008
+
+
+@pytest.mark.asyncio
+async def test_failed_command_mode_approval_does_not_resolve_active_intervention() -> (
+    None
+):
     runtime = SessionRuntime()
     runtime.state = SessionState.WAITING_FOR_APPROVAL
     runtime._active_approval_intervention_id = "intv_active_001"
@@ -103,7 +218,9 @@ async def test_failed_command_mode_approval_does_not_resolve_active_intervention
 
     runtime._connector = FakeConnector()  # type: ignore[assignment]
 
-    await runtime.handle_client_message({"type": "approve", "payload": {"checkpoint_id": "chk_active_001"}})
+    await runtime.handle_client_message(
+        {"type": "approve", "payload": {"checkpoint_id": "chk_active_001"}}
+    )
 
     assert runtime._active_approval_intervention_id == "intv_active_001"
     assert runtime._active_approval_payload is not None
@@ -146,7 +263,9 @@ async def test_successful_command_mode_approval_resolves_active_intervention() -
 
     runtime._connector = FakeConnector()  # type: ignore[assignment]
 
-    await runtime.handle_client_message({"type": "approve", "payload": {"checkpoint_id": "chk_active_002"}})
+    await runtime.handle_client_message(
+        {"type": "approve", "payload": {"checkpoint_id": "chk_active_002"}}
+    )
 
     assert runtime._active_approval_intervention_id is None
     assert runtime._active_approval_payload is None
@@ -155,7 +274,9 @@ async def test_successful_command_mode_approval_resolves_active_intervention() -
 
 
 @pytest.mark.asyncio
-async def test_connect_replays_browser_context_frame_commands_and_active_intervention() -> None:
+async def test_connect_replays_browser_context_frame_commands_and_active_intervention() -> (
+    None
+):
     runtime = SessionRuntime()
     runtime.state = SessionState.RUNNING
     runtime.adapter_id = "opencode"
@@ -233,7 +354,9 @@ async def test_connect_replays_browser_context_frame_commands_and_active_interve
 
 
 @pytest.mark.asyncio
-async def test_local_observe_attach_reuses_existing_session(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_local_observe_attach_reuses_existing_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeConnector:
         adapter_id = "opencode"
         capabilities = {
@@ -259,7 +382,15 @@ async def test_local_observe_attach_reuses_existing_session(monkeypatch: pytest.
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, auto_delegate, observer_mode, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                auto_delegate,
+                observer_mode,
+                bridge_context,
+            )
             self.observed_session_id = observed_session_id
             self.runtime.adapter_run_id = self.adapter_run_id
             self.runtime.state = SessionState.RUNNING
@@ -274,7 +405,11 @@ async def test_local_observe_attach_reuses_existing_session(monkeypatch: pytest.
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     manager = SessionManager(allowed_origins=("http://127.0.0.1:5173",))
     payload = LocalObserveOpenCodeRequest(
         project_directory="/Users/leslie/Documents/Lumon",
@@ -283,16 +418,31 @@ async def test_local_observe_attach_reuses_existing_session(monkeypatch: pytest.
         auto_delegate=False,
     )
 
-    first = await manager.attach_local_opencode_observer(payload, frontend_origin="http://127.0.0.1:5173")
-    second = await manager.attach_local_opencode_observer(payload, frontend_origin="http://127.0.0.1:5173")
+    first = await manager.attach_local_opencode_observer(
+        payload, frontend_origin="http://127.0.0.1:5173"
+    )
+    second = await manager.attach_local_opencode_observer(
+        payload, frontend_origin="http://127.0.0.1:5173"
+    )
 
     assert first["already_attached"] is False
     assert second["already_attached"] is True
     assert first["session_id"] == second["session_id"]
+    runtime = manager._sessions[first["session_id"]]
+    assert runtime._artifact.metrics.attach_requested_at is not None
+    assert runtime._artifact.metrics.attached_at is not None
+    assert (
+        runtime._artifact.metrics.attach_requested_at
+        <= runtime._artifact.metrics.attached_at
+    )
+    assert runtime._artifact.metrics.attach_latency_ms is not None
+    assert runtime._artifact.metrics.duplicate_attach_prevented == 1
 
 
 @pytest.mark.asyncio
-async def test_local_observe_attach_rolls_back_failed_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_local_observe_attach_rolls_back_failed_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FailingConnector:
         adapter_id = "opencode"
         capabilities = {
@@ -317,7 +467,16 @@ async def test_local_observe_attach_rolls_back_failed_runtime(monkeypatch: pytes
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, auto_delegate, observer_mode, observed_session_id, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                auto_delegate,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
             raise RuntimeError("attach failed")
 
         async def pause(self) -> None: ...
@@ -330,7 +489,11 @@ async def test_local_observe_attach_rolls_back_failed_runtime(monkeypatch: pytes
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FailingConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FailingConnector(runtime),
+    )
     manager = SessionManager(allowed_origins=("http://127.0.0.1:5173",))
     payload = LocalObserveOpenCodeRequest(
         project_directory="/Users/leslie/Documents/Lumon",
@@ -340,10 +503,17 @@ async def test_local_observe_attach_rolls_back_failed_runtime(monkeypatch: pytes
     )
 
     with pytest.raises(RuntimeError, match="attach failed"):
-        await manager.attach_local_opencode_observer(payload, frontend_origin="http://127.0.0.1:5173")
+        await manager.attach_local_opencode_observer(
+            payload, frontend_origin="http://127.0.0.1:5173"
+        )
 
     assert manager._sessions == {}
-    assert manager._opencode_attach.runtime_for_observed_session(manager._sessions, "ses_local_attach_fail_001") is None
+    assert (
+        manager._opencode_attach.runtime_for_observed_session(
+            manager._sessions, "ses_local_attach_fail_001"
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -401,8 +571,6 @@ async def test_emit_routing_decision_enriches_trace_and_broadcasts_diagnostic_wh
     assert messages[-1]["payload"]["event_name"] == "browser_signal"
 
 
-
-
 @pytest.mark.asyncio
 async def test_record_browser_command_appends_event_without_runtime_error() -> None:
     runtime = SessionRuntime()
@@ -428,7 +596,9 @@ async def test_record_browser_command_appends_event_without_runtime_error() -> N
 
 
 @pytest.mark.asyncio
-async def test_emit_frame_keeps_latest_frame_state_when_websocket_broadcast_is_suppressed(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_emit_frame_keeps_latest_frame_state_when_websocket_broadcast_is_suppressed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = SessionRuntime()
     messages: list[dict] = []
     runtime.broadcast = _capture_broadcast(messages)  # type: ignore[assignment]
@@ -452,7 +622,9 @@ async def test_emit_frame_keeps_latest_frame_state_when_websocket_broadcast_is_s
 
 
 @pytest.mark.asyncio
-async def test_start_task_resets_stale_frame_counters(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_start_task_resets_stale_frame_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeConnector:
         adapter_id = "playwright_native"
         capabilities = {
@@ -477,12 +649,29 @@ async def test_start_task_resets_stale_frame_counters(monkeypatch: pytest.Monkey
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, auto_delegate, observer_mode, observed_session_id, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                auto_delegate,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     runtime = SessionRuntime()
     runtime.state = SessionState.IDLE
-    runtime._latest_frame_payload = {"frame_seq": 99, "mime_type": "image/png", "data_base64": "stale"}
+    runtime._latest_frame_payload = {
+        "frame_seq": 99,
+        "mime_type": "image/png",
+        "data_base64": "stale",
+    }
     runtime._latest_frame_seq = 99
     runtime._latest_frame_generation = 8
     runtime._latest_command_frame_generation = 4
@@ -506,7 +695,9 @@ async def test_start_task_resets_stale_frame_counters(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
-async def test_start_task_uses_connector_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_start_task_uses_connector_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, bool, str | None, str | None, bool]] = []
 
     class FakeConnector:
@@ -544,7 +735,11 @@ async def test_start_task_uses_connector_factory(monkeypatch: pytest.MonkeyPatch
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     runtime = SessionRuntime()
 
     await runtime.handle_client_message(
@@ -563,11 +758,21 @@ async def test_start_task_uses_connector_factory(monkeypatch: pytest.MonkeyPatch
     assert runtime.adapter_id == "opencode"
     assert runtime.web_mode == "delegate_playwright"
     assert runtime.web_bridge == "playwright_native"
-    assert calls == [("Find a hotel in NYC", False, "delegate_playwright", "playwright_native", False)]
+    assert calls == [
+        (
+            "Find a hotel in NYC",
+            False,
+            "delegate_playwright",
+            "playwright_native",
+            False,
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_start_task_defaults_to_live_when_demo_mode_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_start_task_defaults_to_live_when_demo_mode_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, bool, str | None, str | None, bool]] = []
 
     class FakeConnector:
@@ -605,7 +810,11 @@ async def test_start_task_defaults_to_live_when_demo_mode_omitted(monkeypatch: p
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     runtime = SessionRuntime()
 
     await runtime.handle_client_message(
@@ -632,7 +841,9 @@ async def test_start_task_defaults_to_live_when_demo_mode_omitted(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_attach_observer_uses_live_opencode_observer_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_attach_observer_uses_live_opencode_observer_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, bool, str | None, str | None, bool, bool, str | None]] = []
 
     class FakeConnector:
@@ -659,7 +870,17 @@ async def test_attach_observer_uses_live_opencode_observer_mode(monkeypatch: pyt
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            calls.append((task_text, demo_mode, web_mode, web_bridge, auto_delegate, observer_mode, observed_session_id))
+            calls.append(
+                (
+                    task_text,
+                    demo_mode,
+                    web_mode,
+                    web_bridge,
+                    auto_delegate,
+                    observer_mode,
+                    observed_session_id,
+                )
+            )
 
         async def pause(self) -> None: ...
         async def resume(self) -> None: ...
@@ -669,7 +890,11 @@ async def test_attach_observer_uses_live_opencode_observer_mode(monkeypatch: pyt
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     runtime = SessionRuntime()
 
     await runtime.handle_client_message(
@@ -688,11 +913,23 @@ async def test_attach_observer_uses_live_opencode_observer_mode(monkeypatch: pyt
     assert runtime.run_mode == "live"
     assert runtime.web_mode == "observe_only"
     assert runtime.web_bridge is None
-    assert calls == [("OpenCode interactive session", False, "observe_only", None, False, True, "ses_attach_001")]
+    assert calls == [
+        (
+            "OpenCode interactive session",
+            False,
+            "observe_only",
+            None,
+            False,
+            True,
+            "ses_attach_001",
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_explicit_observe_only_overrides_legacy_web_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_explicit_observe_only_overrides_legacy_web_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, bool, str | None, str | None, bool]] = []
 
     class FakeConnector:
@@ -730,7 +967,11 @@ async def test_explicit_observe_only_overrides_legacy_web_bridge(monkeypatch: py
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     runtime = SessionRuntime()
 
     await runtime.handle_client_message(
@@ -748,11 +989,15 @@ async def test_explicit_observe_only_overrides_legacy_web_bridge(monkeypatch: py
 
     assert runtime.web_mode == "observe_only"
     assert runtime.web_bridge is None
-    assert calls == [("OpenCode interactive session", False, "observe_only", None, False)]
+    assert calls == [
+        ("OpenCode interactive session", False, "observe_only", None, False)
+    ]
 
 
 @pytest.mark.asyncio
-async def test_attach_observer_passes_auto_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_attach_observer_passes_auto_delegate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, bool, str | None, str | None, bool]] = []
 
     class FakeConnector:
@@ -790,7 +1035,11 @@ async def test_attach_observer_passes_auto_delegate(monkeypatch: pytest.MonkeyPa
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     runtime = SessionRuntime()
 
     await runtime.handle_client_message(
@@ -808,11 +1057,21 @@ async def test_attach_observer_passes_auto_delegate(monkeypatch: pytest.MonkeyPa
 
     assert runtime.web_mode == "delegate_playwright"
     assert runtime.web_bridge == "playwright_native"
-    assert calls == [("OpenCode interactive session", False, "delegate_playwright", "playwright_native", True)]
+    assert calls == [
+        (
+            "OpenCode interactive session",
+            False,
+            "delegate_playwright",
+            "playwright_native",
+            True,
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_ingest_optional_trace_rejected_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ingest_optional_trace_rejected_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("LUMON_OPTIONAL_TRACING", raising=False)
     runtime = SessionRuntime()
     messages: list[dict] = []
@@ -836,7 +1095,9 @@ async def test_ingest_optional_trace_rejected_when_disabled(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_ingest_optional_trace_rejected_for_terminal_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ingest_optional_trace_rejected_for_terminal_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LUMON_OPTIONAL_TRACING", "1")
     runtime = SessionRuntime()
     messages: list[dict] = []
@@ -860,7 +1121,9 @@ async def test_ingest_optional_trace_rejected_for_terminal_sessions(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_ingest_optional_trace_emits_canonical_agent_event(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ingest_optional_trace_emits_canonical_agent_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LUMON_OPTIONAL_TRACING", "1")
     runtime = SessionRuntime()
     messages: list[dict] = []
@@ -891,7 +1154,9 @@ async def test_ingest_optional_trace_emits_canonical_agent_event(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_ingest_optional_trace_uses_monotonic_event_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ingest_optional_trace_uses_monotonic_event_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LUMON_OPTIONAL_TRACING", "1")
     runtime = SessionRuntime()
     messages: list[dict] = []
@@ -945,7 +1210,9 @@ async def test_ingest_optional_trace_uses_monotonic_event_sequence(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_ingest_optional_trace_strips_coordinates_when_playwright_is_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ingest_optional_trace_strips_coordinates_when_playwright_is_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LUMON_OPTIONAL_TRACING", "1")
     runtime = SessionRuntime()
     messages: list[dict] = []
@@ -976,7 +1243,9 @@ async def test_ingest_optional_trace_strips_coordinates_when_playwright_is_autho
 
 
 @pytest.mark.asyncio
-async def test_ingest_optional_trace_emits_background_worker_update_for_hidden_subagents(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ingest_optional_trace_emits_background_worker_update_for_hidden_subagents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LUMON_OPTIONAL_TRACING", "1")
     runtime = SessionRuntime()
     messages: list[dict] = []
@@ -1005,7 +1274,9 @@ async def test_ingest_optional_trace_emits_background_worker_update_for_hidden_s
 
 
 @pytest.mark.asyncio
-async def test_ingest_optional_trace_deduplicates_bursty_repeats(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ingest_optional_trace_deduplicates_bursty_repeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LUMON_OPTIONAL_TRACING", "1")
     runtime = SessionRuntime()
     messages: list[dict] = []
@@ -1023,9 +1294,13 @@ async def test_ingest_optional_trace_deduplicates_bursty_repeats(monkeypatch: py
         "summary_text": "Reading docs",
     }
 
-    await runtime.handle_client_message({"type": "ingest_optional_trace", "payload": payload})
+    await runtime.handle_client_message(
+        {"type": "ingest_optional_trace", "payload": payload}
+    )
     first_count = len(messages)
-    await runtime.handle_client_message({"type": "ingest_optional_trace", "payload": payload})
+    await runtime.handle_client_message(
+        {"type": "ingest_optional_trace", "payload": payload}
+    )
 
     assert len(messages) == first_count
 

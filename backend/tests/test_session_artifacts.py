@@ -11,7 +11,12 @@ from fastapi.testclient import TestClient
 
 import app.session.artifacts as artifacts_module
 from app.main import create_app
-from app.protocol.models import BrowserCommandRecord, BrowserContextPayload, BrowserEvidence
+from app.protocol.models import (
+    BrowserCommandRecord,
+    BrowserContextPayload,
+    BrowserEvidence,
+    UiTelemetryPayload,
+)
 from app.session.manager import SessionRuntime
 
 
@@ -21,7 +26,9 @@ async def test_runtime_writes_artifact_with_browser_context_intervention_and_met
 ) -> None:
     monkeypatch.setattr(artifacts_module, "_output_root", lambda: tmp_path)
 
-    runtime = SessionRuntime(session_id="sess_artifact_001", join_token="ws_artifact_001")
+    runtime = SessionRuntime(
+        session_id="sess_artifact_001", join_token="ws_artifact_001"
+    )
     messages: list[dict] = []
     runtime.broadcast = _capture_broadcast(messages)  # type: ignore[assignment]
 
@@ -111,13 +118,18 @@ async def test_runtime_writes_artifact_with_browser_context_intervention_and_met
             meta={},
         )
     )
+
     async def fake_approve(checkpoint_id: str) -> bool:
         assert checkpoint_id == "chk_artifact_001"
         return True
 
     runtime._connector.approve = fake_approve  # type: ignore[assignment]
-    await runtime.handle_client_message({"type": "ui_ready", "payload": {"ready": True}})
-    await runtime.handle_client_message({"type": "approve", "payload": {"checkpoint_id": "chk_artifact_001"}})
+    await runtime.handle_client_message(
+        {"type": "ui_ready", "payload": {"ready": True}}
+    )
+    await runtime.handle_client_message(
+        {"type": "approve", "payload": {"checkpoint_id": "chk_artifact_001"}}
+    )
     await runtime.complete_task("completed", "Finished reviewing the page")
 
     session_dir = tmp_path / "sessions" / runtime.session_id
@@ -151,22 +163,212 @@ async def test_runtime_writes_artifact_with_browser_context_intervention_and_met
     assert artifact["metrics"]["session_completed"] is True
     assert artifact["keyframes"]
 
-    events = [json.loads(line) for line in events_ndjson.read_text(encoding="utf-8").splitlines() if line.strip()]
-    commands = [json.loads(line) for line in commands_ndjson.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert {event["type"] for event in events} >= {"browser_context_update", "agent_event", "approval_required", "task_result"}
+    events = [
+        json.loads(line)
+        for line in events_ndjson.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    commands = [
+        json.loads(line)
+        for line in commands_ndjson.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert {event["type"] for event in events} >= {
+        "browser_context_update",
+        "agent_event",
+        "approval_required",
+        "task_result",
+    }
     assert commands[0]["command"] == "inspect"
     assert commands[0]["status"] == "success"
 
     rollup_path = tmp_path / "metrics" / "sessions.ndjson"
     assert rollup_path.exists()
-    rollup_entries = [json.loads(line) for line in rollup_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rollup_entries = [
+        json.loads(line)
+        for line in rollup_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert rollup_entries[-1]["session_id"] == runtime.session_id
+
+
+@pytest.mark.asyncio
+async def test_runtime_records_ui_telemetry_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(artifacts_module, "_output_root", lambda: tmp_path)
+    runtime = SessionRuntime(
+        session_id="sess_ui_telemetry_001", join_token="ws_ui_telemetry_001"
+    )
+    runtime._artifact.started_at = "2026-03-18T00:00:00Z"
+    runtime.broadcast = _capture_broadcast([])  # type: ignore[assignment]
+
+    runtime.record_ui_telemetry(
+        UiTelemetryPayload(
+            event="open_requested",
+            source="plugin",
+            timestamp="2026-03-18T00:00:01Z",
+            meta={"reason_code": "browser"},
+        )
+    )
+    runtime.record_ui_telemetry(
+        UiTelemetryPayload(
+            event="open_suppressed",
+            source="plugin",
+            timestamp="2026-03-18T00:00:01Z",
+            meta={"reason_code": "tool_active"},
+        )
+    )
+    await runtime.emit_browser_context_update(
+        {
+            "session_id": runtime.session_id,
+            "adapter_id": runtime.adapter_id,
+            "adapter_run_id": runtime.adapter_run_id or "run_pending",
+            "timestamp": "2026-03-18T00:00:02Z",
+            "url": "https://example.com/live",
+            "domain": "example.com",
+            "title": "Live",
+            "environment_type": "external",
+        }
+    )
+    await runtime.emit_frame(
+        {
+            "session_id": runtime.session_id,
+            "frame_seq": 1,
+            "timestamp": "2026-03-18T00:00:03Z",
+            "mime_type": "image/png",
+            "data_base64": base64.b64encode(b"ui-telemetry-png").decode("ascii"),
+        }
+    )
+    runtime.record_ui_telemetry(
+        UiTelemetryPayload(
+            event="meaningful_frame_visible",
+            source="frontend",
+            timestamp="2026-03-18T00:00:04Z",
+            meta={"transport": "webrtc"},
+        )
+    )
+    runtime.record_ui_telemetry(
+        UiTelemetryPayload(
+            event="clarity_ready",
+            source="frontend",
+            timestamp="2026-03-18T00:00:05Z",
+            meta={"mode": "live_status"},
+        )
+    )
+    runtime.record_ui_telemetry(
+        UiTelemetryPayload(
+            event="sprite_visible",
+            source="frontend",
+            timestamp="2026-03-18T00:00:05Z",
+            meta={"delay_ms": 150},
+        )
+    )
+    runtime.record_ui_telemetry(
+        UiTelemetryPayload(
+            event="video_quality_sample",
+            source="frontend",
+            timestamp="2026-03-18T00:00:05Z",
+            meta={"width": 1920, "height": 1080, "fps": 29.8},
+        )
+    )
+
+    metrics = runtime.current_artifact()["artifact"]["metrics"]
+    assert metrics["open_attempt_count"] == 1
+    assert metrics["open_suppressed_count"] == 1
+    assert metrics["noisy_open_prevented_count"] == 1
+    assert metrics["first_frame_at"] == "2026-03-18T00:00:03Z"
+    assert metrics["first_frame_latency_ms"] == 3000
+    assert metrics["first_meaningful_frame_at"] == "2026-03-18T00:00:04Z"
+    assert metrics["meaningful_frame_latency_ms"] == 3000
+    assert metrics["browser_to_meaningful_frame_latency_ms"] == 2000
+    assert metrics["clarity_latency_ms"] == 4000
+    assert metrics["clarity_within_2s"] is False
+    assert metrics["sprite_after_frame_latency_ms"] == 150
+    assert metrics["peak_video_width"] == 1920
+    assert metrics["peak_video_height"] == 1080
+    assert metrics["peak_video_fps"] == 29.8
+    assert metrics["open_reason_counts"]["browser"] == 1
+    assert metrics["open_suppression_reason_counts"]["tool_active"] == 1
+
+
+def test_session_artifact_recorder_counts_false_opens_and_auto_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(artifacts_module, "_output_root", lambda: tmp_path)
+    recorder = artifacts_module.SessionArtifactRecorder(
+        session_id="sess_false_open_001",
+        adapter_id="opencode",
+        adapter_run_id="run_false_open_001",
+        task_text="Watch browser work",
+        observer_mode=True,
+        started_at="2026-03-18T00:00:00Z",
+    )
+
+    recorder.record_ui_telemetry(
+        event="auto_start_completed",
+        timestamp="2026-03-18T00:00:01Z",
+        meta={"startup_latency_ms": 1800},
+    )
+    recorder.record_ui_telemetry(
+        event="open_requested",
+        timestamp="2026-03-18T00:00:02Z",
+        meta={"reason_code": "browser"},
+    )
+
+    artifact = recorder.finalize(
+        status="failed",
+        completed_at="2026-03-18T00:00:06Z",
+        summary_text="No visible page arrived.",
+    )
+
+    assert artifact.metrics.auto_start_count == 1
+    assert artifact.metrics.startup_latency_ms == 1800
+    assert artifact.metrics.false_open_count == 1
+
+
+def test_session_artifact_does_not_mark_completed_open_as_false_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(artifacts_module, "_output_root", lambda: tmp_path)
+    recorder = artifacts_module.SessionArtifactRecorder(
+        session_id="sess_completed_open_001",
+        adapter_id="opencode",
+        adapter_run_id="run_completed_open_001",
+        task_text="Watch browser work",
+        observer_mode=True,
+        started_at="2026-03-18T00:00:00Z",
+    )
+
+    recorder.record_ui_telemetry(
+        event="open_requested",
+        timestamp="2026-03-18T00:00:02Z",
+        meta={"reason_code": "browser"},
+    )
+    recorder.record_ui_telemetry(
+        event="open_completed",
+        timestamp="2026-03-18T00:00:03Z",
+        meta={"reason_code": "browser"},
+    )
+
+    artifact = recorder.finalize(
+        status="failed",
+        completed_at="2026-03-18T00:00:08Z",
+        summary_text="The page never became meaningful.",
+    )
+
+    assert artifact.metrics.open_attempt_count == 1
+    assert artifact.metrics.open_completed_count == 1
+    assert artifact.metrics.false_open_count == 0
+    assert artifact.metrics.open_reason_counts == {"browser": 1}
 
 
 def test_session_artifact_routes_return_persisted_artifact_and_keyframe() -> None:
     app = create_app()
     session_id = "sess_route_artifact_001"
-    output_root = Path(__file__).resolve().parents[2] / "output" / "sessions" / session_id
+    output_root = (
+        Path(__file__).resolve().parents[2] / "output" / "sessions" / session_id
+    )
     keyframes_dir = output_root / "keyframes"
     try:
         keyframes_dir.mkdir(parents=True, exist_ok=True)
@@ -212,7 +414,8 @@ def test_session_artifact_routes_return_persisted_artifact_and_keyframe() -> Non
             encoding="utf-8",
         )
         (output_root / "events.ndjson").write_text(
-            json.dumps({"type": "task_result", "payload": {"status": "completed"}}) + "\n",
+            json.dumps({"type": "task_result", "payload": {"status": "completed"}})
+            + "\n",
             encoding="utf-8",
         )
         (output_root / "commands.ndjson").write_text(
@@ -240,14 +443,18 @@ def test_session_artifact_routes_return_persisted_artifact_and_keyframe() -> Non
             assert payload["events"][0]["type"] == "task_result"
             assert payload["commands"][0]["command"] == "status"
 
-            keyframe_response = client.get(f"/api/session-artifacts/{session_id}/keyframes/001_completed.png")
+            keyframe_response = client.get(
+                f"/api/session-artifacts/{session_id}/keyframes/001_completed.png"
+            )
             assert keyframe_response.status_code == 200
             assert keyframe_response.content == b"png-bytes"
     finally:
         shutil.rmtree(output_root, ignore_errors=True)
 
 
-def test_session_artifact_recorder_preserves_revisits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_session_artifact_recorder_preserves_revisits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(artifacts_module, "_output_root", lambda: tmp_path)
     recorder = artifacts_module.SessionArtifactRecorder(
         session_id="sess_revisit_001",
@@ -282,6 +489,29 @@ def test_session_artifact_recorder_preserves_revisits(tmp_path: Path, monkeypatc
         "https://example.com/b",
         "https://example.com/a",
     ]
+
+
+def test_live_snapshot_writes_session_json_before_finalize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(artifacts_module, "_output_root", lambda: tmp_path)
+    recorder = artifacts_module.SessionArtifactRecorder(
+        session_id="sess_live_snapshot_001",
+        adapter_id="opencode",
+        adapter_run_id="run_live_snapshot_001",
+        task_text="Observe browser work",
+        observer_mode=True,
+        started_at="2026-03-22T00:00:00Z",
+    )
+
+    recorder.note_attach_requested("2026-03-22T00:00:01Z")
+
+    session_json = tmp_path / "sessions" / recorder.session_id / "session.json"
+    assert session_json.exists()
+    snapshot = json.loads(session_json.read_text(encoding="utf-8"))
+    assert snapshot["status"] == "running"
+    assert snapshot["metrics"]["attach_requested_at"] == "2026-03-22T00:00:01Z"
+    assert snapshot["metrics"]["artifact_written"] is False
 
 
 @pytest.mark.asyncio
@@ -319,9 +549,13 @@ async def test_browser_episode_count_does_not_increment_for_quick_page_hops(
     assert runtime._artifact.metrics.browser_episode_count == 1
 
 
-def test_read_commands_keeps_distinct_commands_that_share_a_command_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_commands_keeps_distinct_commands_that_share_a_command_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(artifacts_module, "_output_root", lambda: tmp_path)
-    runtime = SessionRuntime(session_id="sess_cmd_dedupe_001", join_token="ws_cmd_dedupe_001")
+    runtime = SessionRuntime(
+        session_id="sess_cmd_dedupe_001", join_token="ws_cmd_dedupe_001"
+    )
     runtime.record_browser_command(
         BrowserCommandRecord(
             command_id="cmd_same",
@@ -366,10 +600,14 @@ def test_read_commands_keeps_distinct_commands_that_share_a_command_id(tmp_path:
     assert commands[0]["reason"] == "denied"
 
 
-def test_session_artifact_route_keeps_distinct_commands_that_share_a_command_id() -> None:
+def test_session_artifact_route_keeps_distinct_commands_that_share_a_command_id() -> (
+    None
+):
     app = create_app()
     session_id = "sess_route_cmd_dedupe_001"
-    output_root = Path(__file__).resolve().parents[2] / "output" / "sessions" / session_id
+    output_root = (
+        Path(__file__).resolve().parents[2] / "output" / "sessions" / session_id
+    )
     try:
         output_root.mkdir(parents=True, exist_ok=True)
         (output_root / "session.json").write_text(
@@ -445,7 +683,9 @@ def test_session_artifact_route_keeps_distinct_commands_that_share_a_command_id(
             artifact_response = client.get(f"/api/session-artifacts/{session_id}")
             assert artifact_response.status_code == 200
             commands = artifact_response.json()["commands"]
-            assert [(command["command"], command["command_id"]) for command in commands] == [
+            assert [
+                (command["command"], command["command_id"]) for command in commands
+            ] == [
                 ("begin_task", "cmd_same"),
                 ("open", "cmd_same"),
             ]
@@ -453,9 +693,13 @@ def test_session_artifact_route_keeps_distinct_commands_that_share_a_command_id(
         shutil.rmtree(output_root, ignore_errors=True)
 
 
-def test_record_browser_context_attaches_keyframe_to_page_visit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_record_browser_context_attaches_keyframe_to_page_visit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(artifacts_module, "_output_root", lambda: tmp_path)
-    runtime = SessionRuntime(session_id="sess_page_keyframe_001", join_token="ws_page_keyframe_001")
+    runtime = SessionRuntime(
+        session_id="sess_page_keyframe_001", join_token="ws_page_keyframe_001"
+    )
     runtime._artifact.record_frame(
         "image/png",
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2p0i8AAAAASUVORK5CYII=",

@@ -3,17 +3,29 @@ import pytest
 from app.fixtures.build_fixtures import agent_event, main as build_fixtures
 from app.protocol.models import BrowserCommandRequest, BrowserCommandResult
 from app.protocol.enums import ErrorCode, SessionState
-from app.protocol.validation import ProtocolValidationError, validate_client_message, validate_server_message
+from app.protocol.validation import (
+    ProtocolValidationError,
+    validate_client_message,
+    validate_server_message,
+)
 from app.session.state_machine import can_transition, interaction_mode_for_state
 
 
 def test_validate_client_message_start_task() -> None:
     message = validate_client_message(
-        {"type": "start_task", "payload": {"task_text": "Find a hotel", "demo_mode": True, "adapter_id": "opencode"}}
+        {
+            "type": "start_task",
+            "payload": {
+                "task_text": "Find a hotel",
+                "demo_mode": True,
+                "adapter_id": "opencode",
+            },
+        }
     )
     assert message["type"] == "start_task"
     assert message["payload"]["task_text"] == "Find a hotel"
     assert message["payload"]["adapter_id"] == "opencode"
+
 
 def test_validate_client_message_attach_observer() -> None:
     message = validate_client_message(
@@ -61,8 +73,6 @@ def test_validate_client_message_ingest_optional_trace() -> None:
     assert message["payload"]["run_id"] == "run_trace_001"
 
 
-
-
 def test_validate_client_message_webrtc_answer() -> None:
     message = validate_client_message(
         {
@@ -90,6 +100,19 @@ def test_validate_client_message_webrtc_ice() -> None:
     )
     assert message["type"] == "webrtc_ice"
     assert message["payload"]["sdp_mid"] == "0"
+
+
+def test_validate_client_message_webrtc_request_with_demo_local_profile() -> None:
+    message = validate_client_message(
+        {
+            "type": "webrtc_request",
+            "payload": {
+                "stream_profile": "demo_local",
+            },
+        }
+    )
+    assert message["type"] == "webrtc_request"
+    assert message["payload"]["stream_profile"] == "demo_local"
 
 
 def test_validate_server_bridge_offer_message() -> None:
@@ -251,6 +274,7 @@ def test_validate_server_fixture_message() -> None:
 
 def test_state_machine_rules() -> None:
     assert can_transition(SessionState.RUNNING, SessionState.PAUSE_REQUESTED)
+    assert can_transition(SessionState.TAKEOVER, SessionState.RUNNING)
     assert not can_transition(SessionState.COMPLETED, SessionState.RUNNING)
     assert interaction_mode_for_state(SessionState.TAKEOVER) == "takeover"
 

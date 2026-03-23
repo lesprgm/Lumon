@@ -12,8 +12,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,
@@ -37,8 +37,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,
@@ -62,8 +62,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,
@@ -87,8 +87,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,

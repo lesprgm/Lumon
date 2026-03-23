@@ -12,8 +12,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,
@@ -37,8 +37,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,
@@ -62,8 +62,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,
@@ -93,7 +93,7 @@
         "event_seq": 1,
         "event_id": "evt_nav_001",
         "source_event_id": "src_nav_001",
-        "timestamp": "2026-03-19T18:27:16.856647Z",
+        "timestamp": "2026-03-22T17:30:08.966402Z",
         "session_id": "sess_demo_001",
         "adapter_id": "playwright_native",
         "adapter_run_id": "run_demo_001",
@@ -130,7 +130,7 @@
         "event_seq": 2,
         "event_id": "evt_click_001",
         "source_event_id": "src_click_001",
-        "timestamp": "2026-03-19T18:27:16.856658Z",
+        "timestamp": "2026-03-22T17:30:08.966406Z",
         "session_id": "sess_demo_001",
         "adapter_id": "playwright_native",
         "adapter_run_id": "run_demo_001",
@@ -167,7 +167,7 @@
         "event_seq": 3,
         "event_id": "evt_type_001",
         "source_event_id": "src_type_001",
-        "timestamp": "2026-03-19T18:27:16.856661Z",
+        "timestamp": "2026-03-22T17:30:08.966408Z",
         "session_id": "sess_demo_001",
         "adapter_id": "playwright_native",
         "adapter_run_id": "run_demo_001",
@@ -210,7 +210,7 @@
         "agent_id": "worker_001",
         "summary_text": "Comparing hotel ratings in the background",
         "state": "running",
-        "timestamp": "2026-03-19T18:27:16.856875Z"
+        "timestamp": "2026-03-22T17:30:08.966482Z"
       }
     }
   },
@@ -227,8 +227,8 @@
         "active_checkpoint_id": "chk_demo_001",
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,
@@ -247,7 +247,7 @@
         "event_seq": 4,
         "event_id": "evt_submit_001",
         "source_event_id": "src_submit_001",
-        "timestamp": "2026-03-19T18:27:16.856670Z",
+        "timestamp": "2026-03-22T17:30:08.966411Z",
         "session_id": "sess_demo_001",
         "adapter_id": "playwright_native",
         "adapter_run_id": "run_demo_001",
@@ -307,8 +307,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,
@@ -327,7 +327,7 @@
         "event_seq": 5,
         "event_id": "evt_sub_spawn_001",
         "source_event_id": "src_sub_spawn_001",
-        "timestamp": "2026-03-19T18:27:16.856673Z",
+        "timestamp": "2026-03-22T17:30:08.966413Z",
         "session_id": "sess_demo_001",
         "adapter_id": "playwright_native",
         "adapter_run_id": "run_demo_001",
@@ -364,7 +364,7 @@
         "event_seq": 6,
         "event_id": "evt_sub_done_001",
         "source_event_id": "src_sub_done_001",
-        "timestamp": "2026-03-19T18:27:16.856676Z",
+        "timestamp": "2026-03-22T17:30:08.966414Z",
         "session_id": "sess_demo_001",
         "adapter_id": "playwright_native",
         "adapter_run_id": "run_demo_001",
@@ -401,7 +401,7 @@
         "event_seq": 7,
         "event_id": "evt_complete_001",
         "source_event_id": "src_complete_001",
-        "timestamp": "2026-03-19T18:27:16.856678Z",
+        "timestamp": "2026-03-22T17:30:08.966416Z",
         "session_id": "sess_demo_001",
         "adapter_id": "playwright_native",
         "adapter_run_id": "run_demo_001",
@@ -443,8 +443,8 @@
         "active_checkpoint_id": null,
         "task_text": "Find a hotel in NYC next weekend under $250",
         "viewport": {
-          "width": 1280,
-          "height": 800
+          "width": 1920,
+          "height": 1080
         },
         "capabilities": {
           "supports_pause": true,

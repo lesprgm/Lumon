@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.config import DEFAULT_ADAPTER_ID, PROTOCOL_VERSION, ViewportConfig
+from app.config import DEFAULT_ADAPTER_ID, PROTOCOL_VERSION
 from app.protocol.enums import (
     ActionType,
     AgentKind,
@@ -89,6 +89,9 @@ class EmptyPayload(StrictModel):
     pass
 
 
+class WebRTCRequestPayload(StrictModel):
+    stream_profile: Literal["demo_local"] | None = None
+
 
 class AdapterCapabilities(StrictModel):
     supports_pause: bool
@@ -163,7 +166,17 @@ class BrowserEvidence(StrictModel):
 
 class BrowserCommandRecord(StrictModel):
     command_id: str
-    command: Literal["begin_task", "status", "inspect", "open", "click", "type", "scroll", "wait", "stop"]
+    command: Literal[
+        "begin_task",
+        "status",
+        "inspect",
+        "open",
+        "click",
+        "type",
+        "scroll",
+        "wait",
+        "stop",
+    ]
     status: Literal["success", "blocked", "partial", "failed", "unsupported"]
     summary_text: str
     timestamp: str
@@ -229,6 +242,27 @@ class OptionalTraceIngestPayload(BaseModel):
 
 class UiReadyPayload(StrictModel):
     ready: bool
+    runtime_version: str | None = None
+    supports_ui_telemetry: bool | None = None
+    supports_ui_ready_handshake: bool | None = None
+
+
+class UiTelemetryPayload(StrictModel):
+    event: Literal[
+        "auto_start_completed",
+        "open_requested",
+        "open_suppressed",
+        "open_completed",
+        "open_failed",
+        "meaningful_frame_visible",
+        "intervention_visible",
+        "clarity_ready",
+        "sprite_visible",
+        "video_quality_sample",
+    ]
+    source: Literal["frontend", "plugin"] = "frontend"
+    timestamp: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class WebRTCAnswerPayload(StrictModel):
@@ -361,10 +395,22 @@ class SessionMetrics(StrictModel):
     attach_requested_at: str | None = None
     attached_at: str | None = None
     first_browser_event_at: str | None = None
+    first_frame_at: str | None = None
     ui_open_requested_at: str | None = None
     ui_ready_at: str | None = None
+    first_meaningful_frame_at: str | None = None
+    intervention_visible_at: str | None = None
+    clarity_ready_at: str | None = None
+    first_sprite_visible_at: str | None = None
+    startup_latency_ms: int | None = None
     attach_latency_ms: int | None = None
+    first_frame_latency_ms: int | None = None
     ui_open_latency_ms: int | None = None
+    meaningful_frame_latency_ms: int | None = None
+    browser_to_meaningful_frame_latency_ms: int | None = None
+    intervention_latency_ms: int | None = None
+    clarity_latency_ms: int | None = None
+    sprite_after_frame_latency_ms: int | None = None
     browser_episode_count: int = 0
     intervention_count: int = 0
     reconnect_count: int = 0
@@ -374,6 +420,21 @@ class SessionMetrics(StrictModel):
     browser_blocked_count: int = 0
     browser_partial_count: int = 0
     stale_target_count: int = 0
+    auto_start_count: int = 0
+    open_attempt_count: int = 0
+    open_suppressed_count: int = 0
+    open_completed_count: int = 0
+    open_failed_count: int = 0
+    false_open_count: int = 0
+    noisy_open_prevented_count: int = 0
+    video_quality_sample_count: int = 0
+    peak_video_width: int | None = None
+    peak_video_height: int | None = None
+    peak_video_fps: float | None = None
+    latest_video_fps: float | None = None
+    clarity_within_2s: bool | None = None
+    open_reason_counts: dict[str, int] = Field(default_factory=dict)
+    open_suppression_reason_counts: dict[str, int] = Field(default_factory=dict)
     session_completed: bool = False
     artifact_written: bool = False
 
@@ -421,7 +482,8 @@ CLIENT_MESSAGE_MODELS: dict[str, type[StrictModel]] = {
     "observer_complete": ObserverCompletePayload,
     "ingest_optional_trace": OptionalTraceIngestPayload,
     "ui_ready": UiReadyPayload,
-    "webrtc_request": EmptyPayload,
+    "ui_telemetry": UiTelemetryPayload,
+    "webrtc_request": WebRTCRequestPayload,
     "webrtc_answer": WebRTCAnswerPayload,
     "webrtc_ice": WebRTCIcePayload,
     "accept_bridge": EmptyPayload,
@@ -459,6 +521,7 @@ SERVER_MESSAGE_MODELS: dict[str, type[StrictModel]] = {
     "error": ErrorPayload,
 }
 
+
 class LocalObserveOpenCodeRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     project_directory: str
@@ -467,11 +530,13 @@ class LocalObserveOpenCodeRequest(BaseModel):
     web_mode: str | None = None
     auto_delegate: bool = False
 
+
 class LocalObserveOpenCodeResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     session_id: str
     open_url: str
     already_attached: bool
+
 
 class BrowserCommandRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -481,6 +546,15 @@ class BrowserCommandRequest(BaseModel):
     observed_session_id: str
     task_text: str | None = None
     frontend_origin: str | None = None
+    url: str | None = None
+    selector: str | None = None
+    element_id: str | None = None
+    text: str | None = None
+    delta_y: int | None = None
+    wait_for_selector: str | None = None
+    wait_for_text: str | None = None
+    timeout_ms: int | None = None
+
 
 class BrowserCommandResult(BaseModel):
     model_config = ConfigDict(extra="allow")

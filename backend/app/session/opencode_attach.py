@@ -18,7 +18,11 @@ class OpenCodeAttachService:
         create_runtime: Callable[[], Any],
     ) -> tuple[Any, bool]:
         observed_session_id = payload.observed_session_id
-        runtime = self.runtime_for_observed_session(sessions, observed_session_id) if observed_session_id else None
+        runtime = (
+            self.runtime_for_observed_session(sessions, observed_session_id)
+            if observed_session_id
+            else None
+        )
         already_attached = runtime is not None
 
         if runtime is None:
@@ -62,15 +66,27 @@ class OpenCodeAttachService:
             "protocol_version": PROTOCOL_VERSION,
             "open_url": build_frontend_open_url(frontend_origin, runtime),
             "already_attached": already_attached,
+            "ui_connected": bool(getattr(runtime, "connection_count", 0)),
+            "ui_ready_at": getattr(runtime._artifact.metrics, "ui_ready_at", None),
         }
 
-    def rollback_prepared_runtime(self, payload: LocalObserveOpenCodeRequest, sessions: dict[str, Any], runtime: Any) -> None:
+    def rollback_prepared_runtime(
+        self,
+        payload: LocalObserveOpenCodeRequest,
+        sessions: dict[str, Any],
+        runtime: Any,
+    ) -> None:
         sessions.pop(runtime.session_id, None)
         observed_session_id = payload.observed_session_id
-        if observed_session_id and self._session_map.get(observed_session_id) == runtime.session_id:
+        if (
+            observed_session_id
+            and self._session_map.get(observed_session_id) == runtime.session_id
+        ):
             self._session_map.pop(observed_session_id, None)
 
-    def runtime_for_observed_session(self, sessions: dict[str, Any], observed_session_id: str | None) -> Any | None:
+    def runtime_for_observed_session(
+        self, sessions: dict[str, Any], observed_session_id: str | None
+    ) -> Any | None:
         if not observed_session_id:
             return None
         session_id = self._session_map.get(observed_session_id)
