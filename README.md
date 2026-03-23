@@ -30,6 +30,22 @@ This is the only supported primary user workflow. Wrapper scripts and manual mul
 
 Completed runs can then be reviewed afterward through the artifact-backed review flow instead of relying on raw logs.
 
+## Sprite State Guide
+The lobster overlay is not decorative filler. Each state maps to a real runtime condition or action class in the sprite manifest.
+
+| State | Preview | Triggered by |
+| --- | --- | --- |
+| `idle` | ![Idle lobster](docs/assets/readme/lobster_idle.gif) | Default session state, `wait`, and non-intervention observation |
+| `busy` | ![Busy lobster](docs/assets/readme/lobster_busy.gif) | `navigate`, `click`, `type`, and `scroll` actions |
+| `reading` | ![Reading lobster](docs/assets/readme/lobster_reading.gif) | `read` actions and inspection-heavy browser work |
+| `success` | ![Success lobster](docs/assets/readme/lobster_success.gif) | Completed browser task / successful terminal state |
+| `error` | ![Error lobster](docs/assets/readme/lobster_error.gif) | Failed browser task / error terminal state |
+| `locomotion` | ![Locomotion lobster](docs/assets/readme/lobster_locomotion.gif) | In-page movement path used by the overlay engine |
+
+The actual source of truth is:
+- `frontend/public/assets/lobster/runtime_manifest.json`
+- `frontend/src/overlay/sprites/lobsterRuntimeManifest.ts`
+
 ## Technical Docs
 Detailed architecture and component docs live in `docs/`.
 
@@ -178,22 +194,6 @@ That tool path is evidence-backed:
 - read-only `webfetch` stays in OpenCode and does not pretend to be a live browser run
 
 Lumon stays quiet during repo-only work. It should feel like a mode that appears when useful, not a separate system you operate manually.
-
-## Sprite State Guide
-The lobster overlay is not decorative filler. Each state maps to a real runtime condition or action class in the sprite manifest.
-
-| State | Preview | Triggered by |
-| --- | --- | --- |
-| `idle` | ![Idle lobster](docs/assets/readme/lobster_idle.gif) | Default session state, `wait`, and non-intervention observation |
-| `busy` | ![Busy lobster](docs/assets/readme/lobster_busy.gif) | `navigate`, `click`, `type`, and `scroll` actions |
-| `reading` | ![Reading lobster](docs/assets/readme/lobster_reading.gif) | `read` actions and inspection-heavy browser work |
-| `success` | ![Success lobster](docs/assets/readme/lobster_success.gif) | Completed browser task / successful terminal state |
-| `error` | ![Error lobster](docs/assets/readme/lobster_error.gif) | Failed browser task / error terminal state |
-| `locomotion` | ![Locomotion lobster](docs/assets/readme/lobster_locomotion.gif) | In-page movement path used by the overlay engine |
-
-The actual source of truth is:
-- `frontend/public/assets/lobster/runtime_manifest.json`
-- `frontend/src/overlay/sprites/lobsterRuntimeManifest.ts`
 
 If you want a live browser view instead of pure observation:
 
