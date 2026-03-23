@@ -1,10 +1,20 @@
-# Lumon
-
-Lumon lets you see what your agent is doing online and step in when it matters.
+<p align="center">
+  <img src="lumon.png" alt="Lumon" width="320" />
+</p>
 
 <p align="center">
-  <img src="docs/assets/readme/lobster_idle.gif" alt="Idle lobster" width="132" />
+  <a href="https://github.com/lesprgm/Lumon/releases">
+    <img src="https://img.shields.io/badge/version-0.1.0-2f2a26?style=flat-square" alt="Version 0.1.0" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-efe7dc?style=flat-square&color=efe7dc&labelColor=3a342f" alt="MIT License" />
+  </a>
+  <a href="https://github.com/lesprgm/Lumon/stargazers">
+    <img src="https://img.shields.io/github/stars/lesprgm/Lumon?style=flat-square&color=d7a86e&labelColor=3a342f" alt="GitHub stars" />
+  </a>
 </p>
+
+Lumon lets you see what your agent is doing online and step in when it matters.
 
 It is a local visual supervision layer that sits beside an existing agent and makes online work legible:
 - what the agent is doing
