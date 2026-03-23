@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start Lumon backend and frontend together for the plugin-first local flow.")
     parser.add_argument("--backend-origin", default="http://127.0.0.1:8000")
-    parser.add_argument("--frontend-origin", default="http://127.0.0.1:5173")
+    parser.add_argument("--frontend-origin", default="http://127.0.0.1:8000")
     return parser.parse_args()
 
 
@@ -47,6 +47,10 @@ def spawn(command: list[str]) -> subprocess.Popen[str]:
     return subprocess.Popen(command, cwd=REPO_ROOT, text=True, stdin=subprocess.DEVNULL)
 
 
+def same_origin(left: str, right: str) -> bool:
+    return left.rstrip("/") == right.rstrip("/")
+
+
 def terminate_all(processes: list[subprocess.Popen[str]]) -> None:
     for process in processes:
         if process.poll() is not None:
@@ -72,16 +76,21 @@ def run() -> int:
         terminate_all([backend])
         raise
 
-    frontend = spawn(["/bin/zsh", str(REPO_ROOT / "scripts" / "start_demo_frontend.sh")])
+    frontend = None
     try:
+        if not same_origin(args.backend_origin, args.frontend_origin):
+            frontend = spawn(["/bin/zsh", str(REPO_ROOT / "scripts" / "start_demo_frontend.sh")])
         wait_for_frontend(args.frontend_origin)
     except Exception:
-        terminate_all([backend, frontend])
+        terminate_all([process for process in [backend, frontend] if process is not None])
         raise
-    processes = [backend, frontend]
+    processes = [process for process in [backend, frontend] if process is not None]
     print("Lumon app started.", flush=True)
     print(f"Backend:  {args.backend_origin}", flush=True)
-    print(f"Frontend: {args.frontend_origin}", flush=True)
+    if frontend is None:
+        print(f"Frontend: {args.frontend_origin} (served by backend)", flush=True)
+    else:
+        print(f"Frontend: {args.frontend_origin}", flush=True)
     print("Use plain OpenCode normally; the Lumon plugin will auto-attach in the background.", flush=True)
 
     def _handle_signal(signum: int, frame) -> None:  # noqa: ARG001

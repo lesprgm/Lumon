@@ -7,12 +7,13 @@ from pydantic import BaseModel
 
 
 PROTOCOL_VERSION = "1.3.1"
-RUNTIME_VERSION = "2026-03-16-browser-flow-v3"
+RUNTIME_VERSION = "2026-03-22-reliability-v1"
 DEFAULT_ADAPTER_ID = "playwright_native"
-SUPPORTED_ADAPTER_IDS = ("playwright_native", "opencode")
-VIEWPORT_WIDTH = 1280
-VIEWPORT_HEIGHT = 800
+VIEWPORT_WIDTH = 1920
+VIEWPORT_HEIGHT = 1080
 DEFAULT_ALLOWED_ORIGINS = (
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
     "http://127.0.0.1:4173",
@@ -22,15 +23,9 @@ DEFAULT_ALLOWED_ORIGINS = (
 )
 
 
-class ViewportConfig(BaseModel):
-    width: int = VIEWPORT_WIDTH
-    height: int = VIEWPORT_HEIGHT
-
-
 class Settings(BaseModel):
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS
     enable_docs: bool = False
-    recording_enabled: bool = False
 
 
 def _parse_bool(value: str | None, *, default: bool = False) -> bool:
@@ -49,9 +44,10 @@ def _parse_csv(value: str | None, *, default: tuple[str, ...]) -> tuple[str, ...
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings(
-        allowed_origins=_parse_csv(os.getenv("LUMON_ALLOWED_ORIGINS"), default=DEFAULT_ALLOWED_ORIGINS),
+        allowed_origins=_parse_csv(
+            os.getenv("LUMON_ALLOWED_ORIGINS"), default=DEFAULT_ALLOWED_ORIGINS
+        ),
         enable_docs=_parse_bool(os.getenv("LUMON_ENABLE_DOCS"), default=False),
-        recording_enabled=_parse_bool(os.getenv("LUMON_RECORDING_ENABLED"), default=False),
     )
 
 

@@ -14,6 +14,7 @@ BACKEND_VENV = BACKEND_ROOT / ".venv"
 BACKEND_PYTHON = BACKEND_VENV / "bin" / "python"
 PLUGIN_PATH = REPO_ROOT / ".opencode" / "plugins" / "lumon.js"
 PLUGIN_TOOL_API_PATH = REPO_ROOT / ".opencode" / "node_modules" / "@opencode-ai" / "plugin" / "dist" / "tool.d.ts"
+FRONTEND_BUILD_INDEX = FRONTEND_ROOT / "dist" / "index.html"
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,12 @@ def collect_doctor_checks() -> list[DoctorCheck]:
             remedy="Run `./lumon setup` to install the frontend dependencies.",
         ),
         DoctorCheck(
+            name="frontend build",
+            ok=_path_exists(FRONTEND_BUILD_INDEX),
+            detail=str(FRONTEND_BUILD_INDEX),
+            remedy="Run `./lumon setup` to build the shipped frontend bundle.",
+        ),
+        DoctorCheck(
             name="project plugin",
             ok=_path_exists(PLUGIN_PATH),
             detail=str(PLUGIN_PATH),
@@ -134,7 +141,10 @@ def render_report(checks: list[DoctorCheck]) -> int:
         if check.remedy:
             print(f"- {check.remedy}", flush=True)
 
-    if any(check.name in {"backend venv", "backend imports", "frontend install", "playwright browser"} for check in failures):
+    if any(
+        check.name in {"backend venv", "backend imports", "frontend install", "frontend build", "playwright browser"}
+        for check in failures
+    ):
         print("- The normal recovery path is `./lumon setup`.", flush=True)
 
     return 1

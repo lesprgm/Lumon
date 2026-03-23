@@ -39,6 +39,7 @@ def build_setup_plan(repo_root: Path = REPO_ROOT) -> list[tuple[list[str], Path]
         ([str(backend_pip), "install", "-e", ".[dev]"], backend_root),
         ([str(backend_python), "-m", "playwright", "install", "chromium"], backend_root),
         (["npm", "install"], frontend_root),
+        (["npm", "run", "build"], frontend_root),
         (["npm", "install"], opencode_root),
     ]
 
@@ -53,6 +54,7 @@ def expected_setup_state() -> dict[str, bool]:
     return {
         "backend_venv": BACKEND_PYTHON.exists(),
         "frontend_modules": (FRONTEND_ROOT / "node_modules").exists(),
+        "frontend_build": (FRONTEND_ROOT / "dist" / "index.html").exists(),
         "opencode_plugin_modules": (OPENCODE_ROOT / "node_modules").exists(),
     }
 

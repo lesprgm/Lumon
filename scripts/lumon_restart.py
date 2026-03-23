@@ -63,14 +63,18 @@ class RestartError(RuntimeError):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Restart Lumon backend/frontend cleanly for the plugin-first local workflow.")
     parser.add_argument("--backend-origin", default="http://127.0.0.1:8000")
-    parser.add_argument("--frontend-origin", default="http://127.0.0.1:5173")
-    parser.add_argument("--force", action="store_true", help="Also kill unrelated processes occupying Lumon ports 8000/5173.")
+    parser.add_argument("--frontend-origin", default="http://127.0.0.1:8000")
+    parser.add_argument("--force", action="store_true", help="Also kill unrelated processes occupying Lumon ports.")
     parser.add_argument("--timeout-seconds", type=float, default=20.0)
     return parser.parse_args()
 
 
 def origin_port(origin: str) -> int:
     return int(origin.rsplit(":", 1)[-1])
+
+
+def same_origin(left: str, right: str) -> bool:
+    return left.rstrip("/") == right.rstrip("/")
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -135,7 +139,7 @@ def is_lumon_control_command(command: str) -> bool:
     return any(marker in command for marker in CONTROL_SCRIPT_MARKERS)
 
 
-def collect_restart_targets(backend_port: int, frontend_port: int) -> tuple[list[StopTarget], list[ForeignOccupant]]:
+def collect_restart_targets(backend_port: int, frontend_port: int | None) -> tuple[list[StopTarget], list[ForeignOccupant]]:
     targets: dict[int, StopTarget] = {}
     foreign: list[ForeignOccupant] = []
 
@@ -146,12 +150,13 @@ def collect_restart_targets(backend_port: int, frontend_port: int) -> tuple[list
         else:
             foreign.append(ForeignOccupant(pid=pid, port=backend_port, command=command))
 
-    for pid in list_listener_pids(frontend_port):
-        command = command_for_pid(pid)
-        if is_lumon_frontend_command(command) or is_lumon_control_command(command):
-            targets[pid] = StopTarget(pid=pid, kind="frontend", reason=f"listening on {frontend_port}", command=command)
-        else:
-            foreign.append(ForeignOccupant(pid=pid, port=frontend_port, command=command))
+    if frontend_port is not None:
+        for pid in list_listener_pids(frontend_port):
+            command = command_for_pid(pid)
+            if is_lumon_frontend_command(command) or is_lumon_control_command(command):
+                targets[pid] = StopTarget(pid=pid, kind="frontend", reason=f"listening on {frontend_port}", command=command)
+            else:
+                foreign.append(ForeignOccupant(pid=pid, port=frontend_port, command=command))
 
     for pid, command in process_table():
         if not is_lumon_control_command(command):
@@ -233,7 +238,7 @@ def rotate_runtime_logs() -> None:
 
 def restart_services(args: argparse.Namespace) -> int:
     backend_port = origin_port(args.backend_origin)
-    frontend_port = origin_port(args.frontend_origin)
+    frontend_port = None if same_origin(args.backend_origin, args.frontend_origin) else origin_port(args.frontend_origin)
     targets, foreign = collect_restart_targets(backend_port, frontend_port)
 
     if foreign and not args.force:
@@ -259,7 +264,8 @@ def restart_services(args: argparse.Namespace) -> int:
     frontend = None
     try:
         wait_for_http(f"{args.backend_origin}/healthz", timeout_seconds=args.timeout_seconds)
-        frontend = spawn(FRONTEND_COMMAND, FRONTEND_LOG)
+        if frontend_port is not None:
+            frontend = spawn(FRONTEND_COMMAND, FRONTEND_LOG)
         wait_for_http(args.frontend_origin, timeout_seconds=max(args.timeout_seconds, 45.0))
     except Exception:
         terminate_pid(backend.pid)
@@ -270,6 +276,8 @@ def restart_services(args: argparse.Namespace) -> int:
     print(f"Backend:  {args.backend_origin} (pid {backend.pid})", flush=True)
     if frontend is not None:
         print(f"Frontend: {args.frontend_origin} (pid {frontend.pid})", flush=True)
+    else:
+        print(f"Frontend: {args.frontend_origin} (served by backend)", flush=True)
     print(f"Logs: {BACKEND_LOG}, {FRONTEND_LOG}", flush=True)
     return 0
 

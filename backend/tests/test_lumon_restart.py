@@ -57,7 +57,7 @@ def test_restart_services_refuses_foreign_port_occupants_without_force(monkeypat
     )
     args = SimpleNamespace(
         backend_origin="http://127.0.0.1:8000",
-        frontend_origin="http://127.0.0.1:5173",
+        frontend_origin="http://127.0.0.1:8000",
         force=False,
         timeout_seconds=20.0,
     )
@@ -95,18 +95,15 @@ def test_restart_services_stops_targets_and_starts_backend_frontend(monkeypatch)
 
     args = SimpleNamespace(
         backend_origin="http://127.0.0.1:8000",
-        frontend_origin="http://127.0.0.1:5173",
+        frontend_origin="http://127.0.0.1:8000",
         force=False,
         timeout_seconds=20.0,
     )
 
     assert lumon_restart.restart_services(args) == 0
     assert stopped == [11, 12]
-    assert [command for command, _log_path in spawned] == [
-        lumon_restart.BACKEND_COMMAND,
-        lumon_restart.FRONTEND_COMMAND,
-    ]
-    assert waited == ["http://127.0.0.1:8000/healthz", "http://127.0.0.1:5173"]
+    assert [command for command, _log_path in spawned] == [lumon_restart.BACKEND_COMMAND]
+    assert waited == ["http://127.0.0.1:8000/healthz", "http://127.0.0.1:8000"]
     assert rotated == ["rotated"]
 
 

@@ -1,5 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
 
 if [[ $# -lt 1 ]]; then
   cat >&2 <<'EOF'
@@ -23,25 +25,25 @@ shift
 
 case "$subcommand" in
   setup)
-    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_setup.py" "$@"
+    exec python3 "$REPO_ROOT/scripts/lumon_setup.py" "$@"
     ;;
   doctor)
-    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_doctor.py" "$@"
+    exec python3 "$REPO_ROOT/scripts/lumon_doctor.py" "$@"
     ;;
   triage)
-    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_triage.py" "$@"
+    exec python3 "$REPO_ROOT/scripts/lumon_triage.py" "$@"
     ;;
   restart)
-    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_restart.py" "$@"
+    exec python3 "$REPO_ROOT/scripts/lumon_restart.py" "$@"
     ;;
   app)
-    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_app.py" "$@"
+    exec python3 "$REPO_ROOT/scripts/lumon_app.py" "$@"
     ;;
   opencode)
-    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_opencode.py" "$@"
+    exec python3 "$REPO_ROOT/scripts/lumon_opencode.py" "$@"
     ;;
   fast-open)
-    exec python3 "/Users/leslie/Documents/Lumon/scripts/lumon_fast_open.py" "$@"
+    exec python3 "$REPO_ROOT/scripts/lumon_fast_open.py" "$@"
     ;;
   *)
     echo "Unknown subcommand: $subcommand" >&2

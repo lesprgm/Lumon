@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--frontend-origin",
-        default="http://127.0.0.1:5173",
+        default="http://127.0.0.1:8000",
         help="Lumon frontend origin.",
     )
     parser.add_argument(

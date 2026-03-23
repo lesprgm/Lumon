@@ -1,0 +1,7 @@
+{
+  "runtime_version": "2026-03-22-reliability-v1",
+  "features": {
+    "ui_telemetry": true,
+    "ui_ready_handshake": true
+  }
+}
