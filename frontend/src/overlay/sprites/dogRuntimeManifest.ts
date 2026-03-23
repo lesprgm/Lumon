@@ -51,6 +51,23 @@ export const dogRuntimeManifest = {
       "loop": true,
       "hold_last_frame_ms": 0
     },
+    "reading": {
+      "sheet_path": "busy/busy_sheet_normalized.png",
+      "frames_dir": "busy/frames",
+      "frame_paths": [
+        "busy/frames/busy_01.png",
+        "busy/frames/busy_02.png",
+        "busy/frames/busy_03.png",
+        "busy/frames/busy_04.png",
+        "busy/frames/busy_05.png",
+        "busy/frames/busy_06.png"
+      ],
+      "frame_count": 6,
+      "fps": 10,
+      "frame_duration_ms": 100,
+      "loop": true,
+      "hold_last_frame_ms": 0
+    },
     "success": {
       "sheet_path": "success/success_sheet_normalized.png",
       "frames_dir": "success/frames",
@@ -124,7 +141,7 @@ export const dogRuntimeManifest = {
       "click": "busy",
       "type": "busy",
       "scroll": "busy",
-      "read": "busy",
+      "read": "reading",
       "wait": "idle",
       "complete": "success",
       "error": "error"
@@ -134,6 +151,7 @@ export const dogRuntimeManifest = {
       "error",
       "success",
       "busy",
+      "reading",
       "locomotion",
       "idle"
     ],

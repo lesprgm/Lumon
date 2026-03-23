@@ -33,6 +33,7 @@ export interface SceneSnapshot {
   targetPoint: { x: number; y: number } | null;
   targetRect: { x: number; y: number; width: number; height: number } | null;
   typing: boolean;
+  fallbackMode: boolean;
 }
 
 const MAX_EVENT_QUEUE = 50;
@@ -44,11 +45,13 @@ const SUBAGENT_SPRING_DAMPING = 24;
 const LOCAL_GLIDE_THRESHOLD = 56;
 const TELEPORT_THRESHOLD = 92;
 const ANCHORED_ACTION_THRESHOLD = 18;
-const TARGET_COALESCE_WINDOW_MS = 140;
-const TARGET_COALESCE_DISTANCE = 28;
+const TARGET_COALESCE_WINDOW_MS = 250;
+const TARGET_COALESCE_DISTANCE = 40;
 const MOVEMENT_EPSILON = 0.42;
 const VELOCITY_EPSILON = 8;
 const EMIT_INTERVAL_MS = 1000 / 30;
+const TAKEOVER_MAIN_SPRING_STIFFNESS = 72;
+const TAKEOVER_MAIN_SPRING_DAMPING = 16;
 const TRANSIENT_ACTION_HOLD_MS: Partial<Record<AgentEventPayload["action_type"], number>> = {
   click: 260,
   type: 420,
@@ -58,6 +61,19 @@ const TRANSIENT_ACTION_HOLD_MS: Partial<Record<AgentEventPayload["action_type"],
   complete: 820,
   error: 820,
 };
+
+function terminalCaptionForState(state: SessionState): string {
+  switch (state) {
+    case "completed":
+      return "Done.";
+    case "failed":
+      return "Something went wrong.";
+    case "stopped":
+      return "Stopped.";
+    default:
+      return "";
+  }
+}
 
 export function resolveHotspotFromEvent(payload: Pick<AgentEventPayload, "cursor" | "target_rect">): { x: number; y: number } | null {
   if (payload.cursor) {
@@ -73,9 +89,16 @@ export function resolveHotspotFromEvent(payload: Pick<AgentEventPayload, "cursor
 }
 
 export function spriteTargetFromHotspot(
-  payload: Pick<AgentEventPayload, "cursor" | "target_rect">,
+  payload: Pick<AgentEventPayload, "action_type" | "cursor" | "target_rect">,
   hotspot: { x: number; y: number } | null,
 ): { x: number; y: number } {
+  if (payload.action_type === "type" && payload.target_rect) {
+    return {
+      x: Math.max(22, Math.min(payload.target_rect.x - 18, 1258)),
+      y: Math.max(22, Math.min(payload.target_rect.y - 10, 778)),
+    };
+  }
+
   if (!hotspot) {
     return {
       x: payload.cursor?.x ?? payload.target_rect?.x ?? 640,
@@ -88,6 +111,22 @@ export function spriteTargetFromHotspot(
   return {
     x: Math.max(22, Math.min(hotspot.x + horizontalOffset, 1258)),
     y: Math.max(22, Math.min(hotspot.y + verticalOffset, 778)),
+  };
+}
+
+export function resolveMainSpringConfig(sessionState: SessionState): {
+  stiffness: number;
+  damping: number;
+} {
+  if (sessionState === "takeover") {
+    return {
+      stiffness: TAKEOVER_MAIN_SPRING_STIFFNESS,
+      damping: TAKEOVER_MAIN_SPRING_DAMPING,
+    };
+  }
+  return {
+    stiffness: MAIN_SPRING_STIFFNESS,
+    damping: MAIN_SPRING_DAMPING,
   };
 }
 
@@ -141,9 +180,18 @@ export class OverlayEngine {
   private pendingFrames: FramePayload[] = [];
   private lastTickMs: number | null = null;
   private lastEmitMs = 0;
+  private lastEventMs = 0;
+  private fallbackMode = false;
 
   constructor(spriteSet: SpriteSet = getSpriteSet("lobster")) {
     this.player = new SpritePlayer(spriteSet.manifest, spriteSet.assetBasePath);
+  }
+
+  setFallbackMode(isActive: boolean): void {
+    if (this.fallbackMode !== isActive) {
+      this.fallbackMode = isActive;
+      this.emit(performance.now(), true);
+    }
   }
 
   setSpriteSet(spriteSet: SpriteSet): void {
@@ -190,6 +238,7 @@ export class OverlayEngine {
     this.pendingFrames = [];
     this.lastTickMs = null;
     this.lastEmitMs = 0;
+    this.lastEventMs = performance.now();
     this.player.syncToRuntime({ sessionState: "idle", actionType: undefined, isMoving: false }, performance.now());
     this.emit(performance.now(), true);
   }
@@ -209,6 +258,38 @@ export class OverlayEngine {
 
   applySessionState(payload: SessionStatePayload): void {
     this.sessionState = payload.state;
+    const nowMs = performance.now();
+
+    if (payload.state === "takeover" && !this.mainAgent) {
+      const takeoverFrame = this.player.update(nowMs, {
+        sessionState: payload.state,
+        actionType: undefined,
+        isMoving: false,
+      }).framePath;
+      this.mainAgent = {
+        id: "main-takeover",
+        x: 960,
+        y: 540,
+        targetX: 960,
+        targetY: 540,
+        framePath: takeoverFrame,
+        kind: "main",
+        summaryText: "Manual control is active.",
+        movementState: "anchored",
+        warpUntilMs: 0,
+        arrivalPulseUntilMs: 0,
+        lastTargetUpdateMs: nowMs,
+        lastActionType: null,
+        vx: 0,
+        vy: 0,
+      };
+    }
+
+    if (payload.state === "completed" || payload.state === "failed" || payload.state === "stopped") {
+      this.caption = terminalCaptionForState(payload.state);
+      this.captionVisibleUntilMs = nowMs + 2400;
+    }
+
     this.player.syncToRuntime({ sessionState: payload.state }, performance.now());
     this.emit(performance.now(), true);
   }
@@ -238,17 +319,59 @@ export class OverlayEngine {
   tick(nowMs: number): void {
     const dtSeconds = this.lastTickMs === null ? 1 / 60 : Math.min((nowMs - this.lastTickMs) / 1000, 0.05);
     this.lastTickMs = nowMs;
+
+    // Override logic when fallbackMode is active
+    let effectiveActionType = this.mainActionType ? toSpriteActionType(this.mainActionType) : undefined;
+    let effectiveCaption = this.caption;
+
+    if (this.fallbackMode) {
+      effectiveActionType = "read";
+
+      if (!this.mainAgent) {
+        // Ensure mainAgent exists in fallback mode even if no events received
+        this.mainAgent = {
+          id: "main-fallback",
+          x: 960,
+          y: 540,
+          targetX: 960,
+          targetY: 540,
+          framePath: "",
+          kind: "main",
+          summaryText: this.caption || "Waiting for visible page",
+          movementState: "anchored",
+          warpUntilMs: 0,
+          arrivalPulseUntilMs: 0,
+          lastTargetUpdateMs: nowMs,
+          lastActionType: "read",
+          vx: 0,
+          vy: 0,
+        };
+      } else {
+        // Glide to center
+        this.mainAgent.targetX = 960;
+        this.mainAgent.targetY = 540;
+        // Force glide state so it doesn't snap if it was far away
+        this.mainAgent.movementState = "local_glide";
+      }
+    } else if (this.sessionState === "running" && nowMs - this.lastEventMs > 2500 && !this.mainActionType) {
+      effectiveActionType = "wait";
+      if (!effectiveCaption || effectiveCaption === "Awaiting run") {
+        effectiveCaption = "Planning next step...";
+      }
+    }
+
     const nextFrame = this.player.update(nowMs, {
       sessionState: this.sessionState,
-      actionType: this.mainActionType ? toSpriteActionType(this.mainActionType) : undefined,
+      actionType: effectiveActionType,
       isMoving: this.mainAgent ? this._isTrackedAgentMoving(this.mainAgent) : false,
     });
+    const { stiffness: mainSpringStiffness, damping: mainSpringDamping } = resolveMainSpringConfig(this.sessionState);
     if (this.mainAgent) {
       this.mainAgent = {
         ...this._advanceAgentPosition(
           this.mainAgent,
-          MAIN_SPRING_STIFFNESS,
-          MAIN_SPRING_DAMPING,
+          mainSpringStiffness,
+          mainSpringDamping,
           dtSeconds,
           nowMs,
         ),
@@ -292,6 +415,40 @@ export class OverlayEngine {
 
   private applyEvent(payload: AgentEventPayload): void {
     const nowMs = performance.now();
+    const isMicroAction = payload.action_type === "read" || payload.action_type === "wait" || payload.action_type === "scroll";
+    const isWithinCoalesceWindow = nowMs - this.lastEventMs <= TARGET_COALESCE_WINDOW_MS;
+
+    if (isMicroAction && isWithinCoalesceWindow && this.lastEventMs > 0) {
+      const hotspot = this._resolveHotspot(payload);
+      const spriteTarget = this._spriteTargetFromHotspot(payload, hotspot);
+      const existingAgent =
+        payload.agent_kind === "same_scene_subagent"
+          ? this.subagents.get(payload.agent_id) ?? null
+          : this.mainAgent;
+      const agent = this._mergeAgentMotion(
+        existingAgent,
+        payload.agent_id,
+        payload.agent_kind,
+        payload.action_type,
+        spriteTarget.x,
+        spriteTarget.y,
+        "",
+        this.mainAgent?.summaryText ?? this.caption,
+        nowMs,
+      );
+      if (payload.agent_kind === "same_scene_subagent") {
+        this.subagents.set(payload.agent_id, agent);
+      } else if (payload.agent_kind === "main") {
+        this.mainAgent = agent;
+      }
+      if (payload.action_type === "click" && hotspot) {
+        this.ripples.push({ x: hotspot.x, y: hotspot.y, createdAt: nowMs });
+      }
+      this.lastEventMs = nowMs;
+      return;
+    }
+
+    this.lastEventMs = nowMs;
     this.caption = payload.summary_text;
     this.captionVisibleUntilMs = nowMs + (payload.action_type === "click" ? 850 : 1200);
     const hotspot = this._resolveHotspot(payload);
@@ -351,19 +508,24 @@ export class OverlayEngine {
     }
   }
 
-  private snapshot(): SceneSnapshot {
+  private snapshot(effectiveCaption?: string): SceneSnapshot {
+    let captionToUse = effectiveCaption ?? this.caption;
+    if (!this.fallbackMode && this.sessionState === "running" && (performance.now() - this.lastEventMs > 2500) && !this.mainActionType && (!captionToUse || captionToUse === "Awaiting run")) {
+      captionToUse = "Planning next step...";
+    }
     return {
       frameSrc: this.frameSrc,
       stageReady: this.stageReady,
       sessionState: this.sessionState,
       mainActionType: this.mainActionType,
-      caption: this.caption,
+      caption: captionToUse,
       mainAgent: this.mainAgent ? this._toSceneAgent(this.mainAgent, performance.now()) : null,
       subagents: [...this.subagents.values()].map((agent) => this._toSceneAgent(agent, performance.now())),
       ripples: this.ripples,
       targetPoint: this.targetPoint,
       targetRect: this.targetRect,
       typing: this.typing,
+      fallbackMode: this.fallbackMode,
     };
   }
 
@@ -428,6 +590,7 @@ export class OverlayEngine {
     if (isAnchoredAction || shouldCoalesce) {
       return {
         ...existing,
+        id: agentId,
         framePath,
         kind: agentKind,
         summaryText,
@@ -440,6 +603,7 @@ export class OverlayEngine {
     if (targetDistance >= TELEPORT_THRESHOLD) {
       return {
         ...existing,
+        id: agentId,
         x: targetX,
         y: targetY,
         targetX,
@@ -460,6 +624,7 @@ export class OverlayEngine {
     if (targetDistance <= LOCAL_GLIDE_THRESHOLD) {
       return {
         ...existing,
+        id: agentId,
         targetX,
         targetY,
         framePath,
@@ -473,6 +638,7 @@ export class OverlayEngine {
 
     return {
       ...existing,
+      id: agentId,
       x: targetX,
       y: targetY,
       targetX,

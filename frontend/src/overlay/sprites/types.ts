@@ -20,7 +20,13 @@ export type LumonActionType =
   | "complete"
   | "error";
 
-export type LumonSpriteAnimationId = "idle" | "locomotion" | "busy" | "success" | "error";
+export type LumonSpriteAnimationId =
+  | "idle"
+  | "locomotion"
+  | "busy"
+  | "reading"
+  | "success"
+  | "error";
 
 export interface SpriteAnchor {
   kind: "bottom_center";

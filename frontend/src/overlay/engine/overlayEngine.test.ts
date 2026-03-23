@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { OverlayEngine } from "./overlayEngine";
+import { OverlayEngine, resolveMainSpringConfig } from "./overlayEngine";
 import { getSpriteSet } from "../sprites";
 import type { AgentEventPayload, FramePayload, SessionStatePayload } from "../../protocol/types";
 
@@ -170,17 +170,41 @@ describe("OverlayEngine", () => {
     vi.spyOn(performance, "now").mockImplementation(() => now);
     const engine = new OverlayEngine();
     let latestFramePath = "";
+    let latestCaption = "";
     engine.subscribe((snapshot) => {
       latestFramePath = snapshot.mainAgent?.framePath ?? "";
+      latestCaption = snapshot.caption;
     });
     engine.setStageReady(true);
     engine.applySessionState(makeSessionState("completed"));
     engine.enqueueEvent({ ...makeEvent(4), action_type: "complete", state: "done", summary_text: "Done" });
     engine.tick(now);
     expect(latestFramePath).toContain("success/");
+    expect(latestCaption).toBe("Done");
     now = 2000;
     engine.tick(now);
     expect(latestFramePath).toContain("idle/");
+  });
+
+  it("replaces planning copy with a completed caption once the session finishes", () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const engine = new OverlayEngine();
+    let latestCaption = "";
+
+    engine.subscribe((snapshot) => {
+      latestCaption = snapshot.caption;
+    });
+
+    engine.setStageReady(true);
+    engine.applySessionState(makeSessionState("running"));
+    now = 3000;
+    engine.tick(now);
+    expect(latestCaption).toBe("Planning next step...");
+
+    engine.applySessionState(makeSessionState("completed"));
+    engine.tick(now);
+    expect(latestCaption).toBe("Done.");
   });
 
   it("keeps only the newest buffered frame and event windows before stage readiness", () => {
@@ -356,6 +380,57 @@ describe("OverlayEngine", () => {
     expect(latestAgentX).toBeGreaterThan(420);
   });
 
+  it("uses a slower main-agent spring during takeover", () => {
+    expect(resolveMainSpringConfig("running")).toEqual({ stiffness: 250, damping: 28 });
+    expect(resolveMainSpringConfig("takeover")).toEqual({ stiffness: 72, damping: 16 });
+
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const engine = new OverlayEngine();
+    let mainAgentX = 0;
+
+    engine.subscribe((snapshot) => {
+      mainAgentX = snapshot.mainAgent?.x ?? 0;
+    });
+    engine.setStageReady(true);
+    engine.applySessionState(makeSessionState("takeover"));
+
+    engine.enqueueEvent({ ...makeEvent(90), cursor: { x: 100, y: 200 } });
+    expect(mainAgentX).toBe(128);
+
+    now = 16;
+    engine.enqueueEvent({ ...makeEvent(91), cursor: { x: 150, y: 200 } });
+    expect(mainAgentX).toBe(128);
+
+    now = 32;
+    engine.tick(now);
+    expect(mainAgentX).toBeGreaterThan(128);
+    expect(mainAgentX).toBeLessThan(130);
+  });
+
+  it("creates a centered main agent when takeover starts before any agent event", () => {
+    const engine = new OverlayEngine();
+    let latestMainAgent: { x: number; y: number; summaryText: string } | null = null;
+
+    engine.subscribe((snapshot) => {
+      latestMainAgent = snapshot.mainAgent
+        ? {
+            x: snapshot.mainAgent.x,
+            y: snapshot.mainAgent.y,
+            summaryText: snapshot.mainAgent.summaryText,
+          }
+        : null;
+    });
+
+    engine.applySessionState(makeSessionState("takeover"));
+
+    expect(latestMainAgent).toEqual({
+      x: 960,
+      y: 540,
+      summaryText: "Manual control is active.",
+    });
+  });
+
   it("keeps read and type actions anchored unless the hotspot meaningfully changes", () => {
     let now = 0;
     vi.spyOn(performance, "now").mockImplementation(() => now);
@@ -369,7 +444,7 @@ describe("OverlayEngine", () => {
     });
     engine.setStageReady(true);
 
-    engine.enqueueEvent({ ...makeEvent(70), action_type: "type", cursor: { x: 300, y: 260 } });
+    engine.enqueueEvent({ ...makeEvent(70), action_type: "type", cursor: { x: 300, y: 260 }, target_rect: null });
     expect(latestAgentX).toBe(328);
     expect(latestMovementState).toBe("anchored");
 
@@ -377,6 +452,34 @@ describe("OverlayEngine", () => {
     engine.enqueueEvent({ ...makeEvent(71), action_type: "read", cursor: { x: 308, y: 262 } });
     expect(latestAgentX).toBe(328);
     expect(latestMovementState).toBe("anchored");
+  });
+
+  it("anchors typing above-left of the active input target rect", () => {
+    const engine = new OverlayEngine();
+    let latestTargetRect: { x: number; y: number; width: number; height: number } | null = null;
+    let latestAgentX = 0;
+    let latestAgentY = 0;
+
+    engine.subscribe((snapshot) => {
+      latestTargetRect = snapshot.targetRect;
+      latestAgentX = snapshot.mainAgent?.x ?? 0;
+      latestAgentY = snapshot.mainAgent?.y ?? 0;
+    });
+    engine.setStageReady(true);
+
+    engine.enqueueEvent({
+      ...makeEvent(72),
+      action_type: "type",
+      state: "typing",
+      cursor: { x: 420, y: 260 },
+      target_rect: { x: 400, y: 240, width: 120, height: 32 },
+    });
+
+    expect(latestTargetRect).toEqual({ x: 400, y: 240, width: 120, height: 32 });
+    expect(latestAgentX).toBeLessThan(400);
+    expect(latestAgentY).toBeLessThan(240);
+    expect(latestAgentX).toBe(382);
+    expect(latestAgentY).toBe(230);
   });
 
   it("coalesces dense nearby updates instead of retargeting every burst", () => {
