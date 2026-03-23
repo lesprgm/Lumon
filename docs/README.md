@@ -13,6 +13,7 @@ The docs are split by subsystem so you can read only the layer you need:
 
 ## Doc Map
 - `ARCHITECTURE.md`: end-to-end system architecture, runtime boundaries, and main flows
+- `TESTER_ONBOARDING.md`: shortest setup and first-run path for local alpha testers
 - `COMPONENT_INVENTORY.md`: file-by-file component map for the current repo
 - `BACKEND.md`: FastAPI routes, session runtime, adapters, command execution, and artifact writing
 - `FRONTEND.md`: app shell, live stage, review mode, websocket/WebRTC clients, and UI state model

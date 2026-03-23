@@ -10,7 +10,7 @@ Current log files:
 
 If you need a clean run, start with:
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon restart
 ```
 
@@ -105,12 +105,12 @@ Do not debug from append-only stale logs after multiple different runs.
 ## Telemetry Trace Tool
 Use this when plain log tails are not enough:
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 python3 scripts/run_browser_flow_trace.py --mode stack --restart
 ```
 
 It writes a bundle under:
-- `/Users/leslie/Documents/Lumon/output/manual_checks/browser_flow_trace_*`
+- `output/manual_checks/browser_flow_trace_*`
 
 That bundle includes:
 - browser command sequence and timings

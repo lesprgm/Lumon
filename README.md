@@ -31,7 +31,7 @@ This is the only supported primary user workflow. Wrapper scripts and manual mul
 Completed runs can then be reviewed afterward through the artifact-backed review flow instead of relying on raw logs.
 
 ## Technical Docs
-Detailed architecture and component docs live in `/Users/leslie/Documents/Lumon/docs/`.
+Detailed architecture and component docs live in `docs/`.
 
 Start here:
 - `docs/README.md`
@@ -49,9 +49,41 @@ This repo is optimized for:
 
 It is not yet hardened for broad public internet deployment.
 
+## Requirements
+For the current local-alpha workflow, testers need:
+- macOS or another Unix-like local dev environment
+- Python `3.11+`
+- Node.js with `npm` on `PATH`
+- OpenCode installed and `opencode` available on `PATH`
+- enough local permissions to install Playwright Chromium during setup
+
+The setup flow installs:
+- backend Python dependencies into `backend/.venv`
+- Playwright Chromium for the delegated browser runtime
+- frontend dependencies in `frontend/node_modules`
+- a production frontend build in `frontend/dist`
+- project-local OpenCode plugin dependencies in `.opencode/node_modules`
+
+## Install Friction
+For a technical alpha tester, install is reasonable:
+- clone repo
+- run `./lumon setup`
+- run `./lumon doctor`
+- run `opencode .`
+
+It is **not** frictionless in a consumer sense yet.
+
+Current friction points:
+- OpenCode must already be installed separately
+- Node.js / `npm` must already exist on `PATH`
+- Playwright Chromium is installed during setup
+- this is still a local repo install, not a packaged app
+- the UI is now served from the backend's built frontend bundle, but OpenCode itself is still an external prerequisite
+- if backend/plugin state drifts after code changes, `./lumon restart` is still the recovery path
+
 ## Architecture
 - Backend: FastAPI session runtime, protocol validation, adapter orchestration
-- Frontend: React/Vite observation UI and overlay engine
+- Frontend: React/Vite app built once and served by the backend in normal use
 - Browser runtime: Playwright
 - OpenCode attach: local plugin + backend session attach
 
@@ -62,24 +94,44 @@ Key properties:
 - structured event contract before UI rendering
 - fixed viewport and overlay coordinate discipline
 
+```mermaid
+flowchart LR
+    U["User in OpenCode"] --> O["OpenCode Session"]
+    O --> P["Lumon Plugin (.opencode)"]
+    P --> B["Lumon Backend (FastAPI)"]
+    B --> F["Lumon Frontend (Built React UI)"]
+    B --> D["Playwright Delegate"]
+    D --> W["Live Web Page"]
+    D --> A["Browser Evidence + Artifacts"]
+    B --> A
+    A --> R["Review Mode"]
+    F --> U
+```
+
 ## Setup Once
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon setup
 ./lumon doctor
 ```
 
+Tester onboarding notes:
+- if `./lumon doctor` reports missing `opencode`, install OpenCode first
+- if it reports missing `npm`, install Node.js first
+- the expected end-user flow after setup is plain `opencode .`
+- `./lumon app`, `./lumon opencode`, and manual multi-terminal startup are internal/debug paths
+
 If Lumon gets into a stale backend/frontend state, use:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon restart
 ```
 
 If OpenCode + plugin behavior still fails and you need a shareable debug bundle:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon triage
 ```
 
@@ -96,14 +148,15 @@ Lumon is optimized for one local-alpha workflow:
 Use plain OpenCode:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 opencode .
 ```
 
 The plugin will:
 - call Lumon's local attach API on first relevant session activity
 - register a real `lumon_browser` tool with OpenCode for interactive browser work
-- start the Lumon backend and frontend automatically if they are not already running
+- start the Lumon backend automatically if it is not already running
+- open the backend-served Lumon UI when the built frontend is ready
 - keep the session observational by default
 - open the Lumon UI only when browser activity or intervention becomes relevant
 - reopen the Lumon UI for later browser/intervention episodes in the same OpenCode session after a cooldown
@@ -126,17 +179,33 @@ That tool path is evidence-backed:
 
 Lumon stays quiet during repo-only work. It should feel like a mode that appears when useful, not a separate system you operate manually.
 
+## Sprite State Guide
+The lobster overlay is not decorative filler. Each state maps to a real runtime condition or action class in the sprite manifest.
+
+| State | Preview | Triggered by |
+| --- | --- | --- |
+| `idle` | ![Idle lobster](docs/assets/readme/lobster_idle.gif) | Default session state, `wait`, and non-intervention observation |
+| `busy` | ![Busy lobster](docs/assets/readme/lobster_busy.gif) | `navigate`, `click`, `type`, and `scroll` actions |
+| `reading` | ![Reading lobster](docs/assets/readme/lobster_reading.gif) | `read` actions and inspection-heavy browser work |
+| `success` | ![Success lobster](docs/assets/readme/lobster_success.gif) | Completed browser task / successful terminal state |
+| `error` | ![Error lobster](docs/assets/readme/lobster_error.gif) | Failed browser task / error terminal state |
+| `locomotion` | ![Locomotion lobster](docs/assets/readme/lobster_locomotion.gif) | In-page movement path used by the overlay engine |
+
+The actual source of truth is:
+- `frontend/public/assets/lobster/runtime_manifest.json`
+- `frontend/src/overlay/sprites/lobsterRuntimeManifest.ts`
+
 If you want a live browser view instead of pure observation:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 LUMON_PLUGIN_WEB_MODE=delegate_playwright LUMON_PLUGIN_AUTO_DELEGATE=true opencode .
 ```
 
 If the plugin cannot attach cleanly, run:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon doctor
 ```
 
@@ -145,7 +214,7 @@ That prints the exact missing prerequisite instead of making you infer it from s
 If the plugin, backend, and frontend drift out of sync after code changes, run:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon restart
 ```
 
@@ -164,7 +233,7 @@ If you want to revert to the defaults, unset those vars and restart `opencode`.
 Shortcut helper (internal):
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon fast-open -- .
 ```
 
@@ -174,7 +243,7 @@ That command sets the same `LUMON_PLUGIN_*` vars above and then runs the interna
 If you want Lumon already running before OpenCode starts:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon app
 ```
 
@@ -189,7 +258,7 @@ These paths still exist for development and tests, but they are **not** the prim
 ### Standalone Playwright Demo
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 LUMON_HEADLESS=0 ./scripts/start_demo_backend.sh
 ```
 
@@ -211,7 +280,7 @@ npm run build
 
 ### Acceptance
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./scripts/run_acceptance.sh
 ```
 
@@ -240,7 +309,7 @@ Completed sessions write local artifacts under `output/sessions/<session_id>/`.
 Review mode is loaded with:
 
 ```text
-http://127.0.0.1:5173/?review_session=<session_id>
+http://127.0.0.1:8000/?review_session=<session_id>
 ```
 
 It is a step-through review surface, not a full video scrubber. It uses milestone keyframes, exact target grounding, intervention records, and session metrics so you can understand what happened after the run.
