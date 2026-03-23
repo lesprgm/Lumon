@@ -9,6 +9,7 @@ import {
   createLumonPlugin,
   createLumonController,
   extractSessionId,
+  isTerminalEvent,
   isAttachRelevantEvent,
   loadPluginConfig,
   shouldOpenForEvent,
@@ -20,7 +21,33 @@ function okHealthResponse() {
     json: async () => ({
       status: 'ok',
       protocol_version: '1.3.1',
-      runtime_version: '2026-03-16-browser-flow-v3',
+      runtime_version: '2026-03-22-reliability-v1',
+      runtime_features: {
+        ui_telemetry: true,
+        ui_ready_handshake: true,
+        live_artifact_persistence: true,
+      },
+      frontend_runtime_version: '2026-03-22-reliability-v1',
+      frontend_features: {
+        ui_telemetry: true,
+        ui_ready_handshake: true,
+      },
+    }),
+  };
+}
+
+function okFrontendReadyResponse() {
+  return {
+    ok: true,
+    json: async () => ({
+      status: 'ok',
+      frontend: 'static',
+      runtime_version: '2026-03-22-reliability-v1',
+      frontend_runtime_version: '2026-03-22-reliability-v1',
+      frontend_features: {
+        ui_telemetry: true,
+        ui_ready_handshake: true,
+      },
     }),
   };
 }
@@ -39,6 +66,7 @@ test('loadPluginConfig defaults to observe_only', () => {
   assert.equal(config.openPolicy, 'browser_or_intervention');
   assert.equal(config.enablePromptSteering, true);
   assert.equal(config.forceDelegateOnBrowserSignal, false);
+  assert.equal(config.frontendOrigin, config.backendOrigin);
 });
 
 test('extractSessionId finds nested session ids', () => {
@@ -66,11 +94,19 @@ test('shouldOpenForEvent opens only for browser/intervention events by default',
     true,
   );
   assert.equal(
-    shouldOpenForEvent({ type: 'permission.asked', message: 'Need approval to continue' }),
+    shouldOpenForEvent({ type: 'permission.asked', checkpoint_id: 'cp_1', message: 'Need approval to continue' }),
     true,
   );
   assert.equal(
+    shouldOpenForEvent({ type: 'permission.asked', message: 'Need approval to continue' }),
+    false,
+  );
+  assert.equal(
     shouldOpenForEvent({ type: 'message.updated', content: 'Read the local repository docs' }),
+    false,
+  );
+  assert.equal(
+    shouldOpenForEvent({ type: 'message.part.updated', content: 'Open wikipedia and click the search box.' }),
     false,
   );
   assert.equal(
@@ -85,17 +121,31 @@ test('classifyOpenSignal distinguishes browser and intervention signals', () => 
     'browser',
   );
   assert.equal(
-    classifyOpenSignal({ type: 'permission.asked', message: 'Need approval to continue' }),
+    classifyOpenSignal({ type: 'permission.asked', checkpoint_id: 'cp_1', message: 'Need approval to continue' }),
     'intervention',
+  );
+  assert.equal(
+    classifyOpenSignal({ type: 'permission.asked', message: 'Need approval to continue' }),
+    null,
   );
   assert.equal(
     classifyOpenSignal({ type: 'message.updated', content: 'Read the local repository docs' }),
     null,
   );
   assert.equal(
+    classifyOpenSignal({ type: 'message.part.updated', content: 'Open wikipedia and click the search box.' }),
+    null,
+  );
+  assert.equal(
     classifyOpenSignal({ type: 'session.diff', diff: 'status blocked pending approval' }),
     null,
   );
+});
+
+test('isTerminalEvent ignores transient session status chatter', () => {
+  assert.equal(isTerminalEvent({ type: 'session.status', status: 'completed', session: { id: 'sess_1' } }), false);
+  assert.equal(isTerminalEvent({ type: 'message.updated', content: 'Task complete.' }), false);
+  assert.equal(isTerminalEvent({ type: 'session.completed', session: { id: 'sess_1' } }), true);
 });
 
 test('buildAttachPayload uses defaults and event session id', () => {
@@ -224,7 +274,7 @@ test('controller attaches once per session and only opens UI on interventions', 
   await controller.handleEvent({ type: 'session.created', session: { id: 'sess_1' } }, '/repo');
   await controller.handleEvent({ type: 'message.updated', session: { id: 'sess_1' }, content: 'Read local files' }, '/repo');
   await controller.handleEvent({ type: 'tool.execute.after', session: { id: 'sess_1' }, tool: { name: 'webfetch', url: 'https://example.com' } }, '/repo');
-  await controller.handleEvent({ type: 'permission.asked', session: { id: 'sess_1' }, message: 'Need approval to continue' }, '/repo');
+  await controller.handleEvent({ type: 'permission.asked', session: { id: 'sess_1' }, checkpoint_id: 'cp_1', message: 'Need approval to continue' }, '/repo');
 
   assert.equal(attaches.length, 1);
   assert.deepEqual(opens, ['http://127.0.0.1:5173/?session_id=lumon_1']);
@@ -273,6 +323,50 @@ test('controller opens for browser signals with episode/cooldown gating', async 
   ]);
 });
 
+test('controller suppresses duplicate browser signals before reopening the UI', async (t) => {
+  const originalDateNow = Date.now;
+  let now = 1000;
+  Date.now = () => now;
+  t.after(() => {
+    Date.now = originalDateNow;
+  });
+
+  const opens = [];
+  const telemetry = [];
+  const controller = createLumonController({
+    config: {
+      webMode: 'observe_only',
+      autoDelegate: false,
+      openPolicy: 'browser_or_intervention',
+      disableAutoStart: false,
+      browserEpisodeGapMs: 25000,
+      interventionEpisodeGapMs: 10000,
+      reopenCooldownMs: 20000,
+    },
+    attach: async () => ({
+      session_id: 'lumon_dup',
+      open_url: 'http://127.0.0.1:5173/?session_id=lumon_dup',
+      already_attached: false,
+    }),
+    startApp: async () => {},
+    waitForHealth: async () => {},
+    openUrl: async (url) => opens.push(url),
+    recordUiTelemetry: async (payload) => telemetry.push(payload),
+    log: async () => {},
+  });
+
+  await controller.handleEvent({ type: 'session.created', session: { id: 'sess_dup' } }, '/repo');
+  await controller.handleEvent({ type: 'tool.execute.after', session: { id: 'sess_dup' }, tool: { name: 'webfetch', url: 'https://example.com' } }, '/repo');
+  now += 100;
+  await controller.handleEvent({ type: 'tool.execute.after', session: { id: 'sess_dup' }, tool: { name: 'webfetch', url: 'https://example.com' } }, '/repo');
+
+  assert.deepEqual(opens, ['http://127.0.0.1:5173/?session_id=lumon_dup']);
+  assert.equal(
+    telemetry.some((entry) => entry.event === 'open_suppressed' && entry.meta?.reason_code === 'duplicate_signal'),
+    true,
+  );
+});
+
 test('controller can reopen faster for intervention episodes', async (t) => {
   const originalDateNow = Date.now;
   let now = 1000;
@@ -304,9 +398,9 @@ test('controller can reopen faster for intervention episodes', async (t) => {
   });
 
   await controller.handleEvent({ type: 'session.created', session: { id: 'sess_3' } }, '/repo');
-  await controller.handleEvent({ type: 'permission.asked', session: { id: 'sess_3' }, message: 'Need approval to continue' }, '/repo');
+  await controller.handleEvent({ type: 'permission.asked', session: { id: 'sess_3' }, checkpoint_id: 'cp_3a', message: 'Need approval to continue' }, '/repo');
   now += 12000;
-  await controller.handleEvent({ type: 'permission.asked', session: { id: 'sess_3' }, message: 'Need approval to continue' }, '/repo');
+  await controller.handleEvent({ type: 'permission.asked', session: { id: 'sess_3' }, checkpoint_id: 'cp_3b', message: 'Need approval to continue' }, '/repo');
 
   assert.deepEqual(opens, [
     'http://127.0.0.1:5173/?session_id=lumon_3',
@@ -355,6 +449,53 @@ test('controller suppresses observer-driven browser reopen while tool-backed bro
   );
 
   assert.deepEqual(opens, []);
+});
+
+test('controller suppresses observer-driven browser open while an interactive browser task is active', async (t) => {
+  const originalDateNow = Date.now;
+  let now = 30_000;
+  Date.now = () => now;
+  t.after(() => {
+    Date.now = originalDateNow;
+  });
+
+  const opens = [];
+  const attaches = [];
+  const activeBrowserTasks = new Map([
+    ['sess_tool_active', { source: 'prompt_steering', expiresAt: now + 60_000 }],
+  ]);
+  const controller = createLumonController({
+    config: {
+      webMode: 'observe_only',
+      autoDelegate: false,
+      openPolicy: 'browser_or_intervention',
+      disableAutoStart: false,
+      browserEpisodeGapMs: 25000,
+      interventionEpisodeGapMs: 10000,
+      reopenCooldownMs: 20000,
+    },
+    attach: async (payload) => {
+      attaches.push(payload);
+      return {
+        session_id: 'lumon_tool_active',
+        open_url: 'http://127.0.0.1:5173/?session_id=lumon_tool_active',
+        already_attached: false,
+      };
+    },
+    startApp: async () => {},
+    waitForHealth: async () => {},
+    openUrl: async (url) => opens.push(url),
+    log: async () => {},
+    activeBrowserTasks,
+  });
+
+  await controller.handleEvent(
+    { type: 'message.part.updated', session: { id: 'sess_tool_active' }, payload: { command: 'click' } },
+    '/repo',
+  );
+
+  assert.deepEqual(opens, []);
+  assert.equal(attaches.length, 0);
 });
 
 test('createLumonPlugin exposes lumon_browser as a real custom tool', async () => {
@@ -545,7 +686,7 @@ test('tool.definition hardens lumon_browser guidance for the model', async () =>
   assert.match(output.description, /never narrate browser success/i);
 });
 
-test('lumon_browser auto-start launches backend and frontend directly before retrying', async (t) => {
+test('lumon_browser auto-start launches the backend-served frontend before retrying', async (t) => {
   const shellCommands = [];
   const originalFetch = global.fetch;
   let browserCommandAttempts = 0;
@@ -570,8 +711,8 @@ test('lumon_browser auto-start launches backend and frontend directly before ret
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:8000/__lumon_frontend_ready__') {
+      return okFrontendReadyResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -601,15 +742,12 @@ test('lumon_browser auto-start launches backend and frontend directly before ret
   assert.equal(parsed.status, 'success');
   assert.equal(browserCommandAttempts, 2);
   assert.ok(shellCommands.some((entry) => entry.includes('./scripts/start_demo_backend.sh')));
-  assert.ok(shellCommands.some((entry) => entry.includes('./scripts/start_demo_frontend.sh')));
+  assert.equal(shellCommands.some((entry) => entry.includes('./scripts/start_demo_frontend.sh')), false);
 });
 
-test('intervention episode starts the frontend before opening the Lumon UI when backend is already up', async (t) => {
+test('intervention episode opens the backend-served Lumon UI when backend is already up', async (t) => {
   const shellCommands = [];
   const originalFetch = global.fetch;
-  const originalTimeout = process.env.LUMON_PLUGIN_STARTUP_TIMEOUT_MS;
-  let frontendStarted = false;
-  process.env.LUMON_PLUGIN_STARTUP_TIMEOUT_MS = '50';
 
   global.fetch = async (url) => {
     const asText = String(url);
@@ -618,7 +756,7 @@ test('intervention episode starts the frontend before opening the Lumon UI when 
         ok: true,
         json: async () => ({
           session_id: 'lumon_1',
-          open_url: 'http://127.0.0.1:5173/?session_id=lumon_1',
+          open_url: 'http://127.0.0.1:8000/?session_id=lumon_1',
           already_attached: false,
         }),
       };
@@ -629,31 +767,24 @@ test('intervention episode starts the frontend before opening the Lumon UI when 
         json: async () => ({
           status: 'ok',
           protocol_version: '1.3.1',
-          runtime_version: '2026-03-16-browser-flow-v3',
+          runtime_version: '2026-03-22-reliability-v1',
+          runtime_features: { ui_telemetry: true, ui_ready_handshake: true, live_artifact_persistence: true },
         }),
       };
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return frontendStarted ? okFrontendResponse() : { ok: false, text: async () => '' };
+    if (asText === 'http://127.0.0.1:8000/__lumon_frontend_ready__') {
+      return okFrontendReadyResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
 
   t.after(() => {
     global.fetch = originalFetch;
-    if (originalTimeout === undefined) {
-      delete process.env.LUMON_PLUGIN_STARTUP_TIMEOUT_MS;
-    } else {
-      process.env.LUMON_PLUGIN_STARTUP_TIMEOUT_MS = originalTimeout;
-    }
   });
 
   const shellHelper = async (strings, ...values) => {
     const command = String.raw({ raw: strings }, ...values);
     shellCommands.push(command);
-    if (command.includes('./scripts/start_demo_frontend.sh')) {
-      frontendStarted = true;
-    }
   };
 
   const plugin = await createLumonPlugin({
@@ -672,12 +803,13 @@ test('intervention episode starts the frontend before opening the Lumon UI when 
     event: {
       type: 'permission.asked',
       session: { id: 'sess_browser' },
+      checkpoint_id: 'cp_browser',
       message: 'Need approval to continue',
     },
   });
 
-  assert.ok(shellCommands.some((entry) => entry.includes('./scripts/start_demo_frontend.sh')));
-  assert.ok(shellCommands.some((entry) => entry.includes('open "http://127.0.0.1:5173/?session_id=lumon_1"')));
+  assert.equal(shellCommands.some((entry) => entry.includes('./scripts/start_demo_frontend.sh')), false);
+  assert.ok(shellCommands.some((entry) => entry.includes('open "http://127.0.0.1:8000/?session_id=lumon_1"')));
 });
 
 
@@ -835,6 +967,60 @@ test('lumon_browser opens the UI only when a command returns frame evidence', as
   assert.equal(shellCommands.some((entry) => entry.includes('open "http://127.0.0.1:5173/?session_id=lumon_tool"')), false);
 });
 
+test('lumon_browser opens the UI from begin_task once frame evidence exists', async (t) => {
+  const shellCommands = [];
+  const originalFetch = global.fetch;
+
+  global.fetch = async (url) => {
+    const asText = String(url);
+    if (asText.endsWith('/api/local/opencode/browser/command')) {
+      return {
+        ok: true,
+        json: async () => ({
+          command_id: 'cmd_begin',
+          command: 'begin_task',
+          status: 'success',
+          summary_text: 'Lumon prepared the task and opened Wikipedia.',
+          open_url: 'http://127.0.0.1:5173/?session_id=lumon_begin',
+          evidence: { verified: true, frame_emitted: true },
+        }),
+      };
+    }
+    if (asText.endsWith('/healthz')) {
+      return okHealthResponse();
+    }
+    if (asText === 'http://127.0.0.1:5173') {
+      return okFrontendResponse();
+    }
+    throw new Error(`unexpected fetch ${asText}`);
+  };
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  const shellHelper = async (strings, ...values) => {
+    shellCommands.push(String.raw({ raw: strings }, ...values));
+  };
+
+  const plugin = await createLumonPlugin({
+    $: shellHelper,
+    directory: '/repo',
+    worktree: '/repo',
+    serverUrl: new URL('http://127.0.0.1:59207'),
+    project: { id: 'proj_1' },
+    client: { app: { log: async () => {} } },
+  });
+
+  const result = await plugin.tool.lumon_browser.execute(
+    { command_id: 'cmd_begin', command: 'begin_task', task_text: 'Open Wikipedia' },
+    { sessionID: 'sess_123', directory: '/repo', metadata: () => {} },
+  );
+
+  const parsed = JSON.parse(result);
+  assert.equal(parsed.status, 'success');
+  assert.equal(shellCommands.some((entry) => entry.includes('open "http://127.0.0.1:5173/?session_id=lumon_begin"')), true);
+});
+
 test('blocked command does not reopen the already-open Lumon UI for the same task', async (t) => {
   const shellCommands = [];
   const originalFetch = global.fetch;
@@ -935,7 +1121,8 @@ test('lumon_browser keeps a successful command successful when UI auto-open fail
         json: async () => ({
           status: 'ok',
           protocol_version: '1.3.1',
-          runtime_version: '2026-03-16-browser-flow-v3',
+          runtime_version: '2026-03-22-reliability-v1',
+          runtime_features: { ui_telemetry: true, ui_ready_handshake: true, live_artifact_persistence: true },
         }),
       };
     }
@@ -1359,7 +1546,8 @@ test('lumon_browser falls back to plugin directory when context.directory is mis
         json: async () => ({
           status: 'ok',
           protocol_version: '1.3.1',
-          runtime_version: '2026-03-16-browser-flow-v3',
+          runtime_version: '2026-03-22-reliability-v1',
+          runtime_features: { ui_telemetry: true, ui_ready_handshake: true, live_artifact_persistence: true },
         }),
       };
     }
@@ -1411,7 +1599,8 @@ test('lumon_browser falls back to generated session id when context session keys
         json: async () => ({
           status: 'ok',
           protocol_version: '1.3.1',
-          runtime_version: '2026-03-16-browser-flow-v3',
+          runtime_version: '2026-03-22-reliability-v1',
+          runtime_features: { ui_telemetry: true, ui_ready_handshake: true, live_artifact_persistence: true },
         }),
       };
     }
@@ -1465,7 +1654,8 @@ test('lumon_browser generates command_id when tool args omit command_id', async 
         json: async () => ({
           status: 'ok',
           protocol_version: '1.3.1',
-          runtime_version: '2026-03-16-browser-flow-v3',
+          runtime_version: '2026-03-22-reliability-v1',
+          runtime_features: { ui_telemetry: true, ui_ready_handshake: true, live_artifact_persistence: true },
         }),
       };
     }

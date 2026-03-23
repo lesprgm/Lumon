@@ -7,15 +7,20 @@ This is the primary local-alpha integration path.
 Normal setup:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon setup
 ./lumon doctor
 ```
 
+Prerequisites on the tester machine:
+- Python `3.11+`
+- Node.js / `npm`
+- OpenCode installed and `opencode` available on `PATH`
+
 If the plugin starts opening stale or blank sessions after local code changes, run:
 
 ```bash
-cd /Users/leslie/Documents/Lumon
+cd <repo-root>
 ./lumon restart
 ```
 

@@ -2,8 +2,8 @@ import { appendFileSync } from "node:fs";
 import { tool } from "@opencode-ai/plugin";
 
 const DEFAULT_BACKEND_ORIGIN = "http://127.0.0.1:8000";
-const DEFAULT_FRONTEND_ORIGIN = "http://127.0.0.1:5173";
-const EXPECTED_RUNTIME_VERSION = "2026-03-16-browser-flow-v3";
+const DEFAULT_FRONTEND_ORIGIN = DEFAULT_BACKEND_ORIGIN;
+const EXPECTED_RUNTIME_VERSION = "2026-03-22-reliability-v1";
 const DEFAULT_WEB_MODE = "observe_only";
 const DEFAULT_OPEN_POLICY = "browser_or_intervention";
 const DEFAULT_FORCE_DELEGATE_ON_BROWSER_SIGNAL = false;
@@ -11,6 +11,9 @@ const DEFAULT_BROWSER_EPISODE_GAP_MS = 25000;
 const DEFAULT_INTERVENTION_EPISODE_GAP_MS = 10000;
 const DEFAULT_REOPEN_COOLDOWN_MS = 20000;
 const DEFAULT_ENABLE_PROMPT_STEERING = true;
+const DEFAULT_BROWSER_COMMAND_TIMEOUT_MS = 90000;
+const ACTIVE_BROWSER_TASK_WINDOW_MS = 180000;
+const OPEN_SIGNAL_DEDUPE_WINDOW_MS = 1000;
 const BROWSER_TOKENS = ["browser", "webfetch", "open_url", "open-url", "navigate", "visit", "goto", "search", "playwright", "chrome", "site"];
 const INTERVENTION_TOKENS = ["approval", "intervention", "takeover", "permission", "confirm", "sensitive", "blocked"];
 const INTERACTIVE_BROWSER_VERBS = ["open", "click", "type", "scroll", "fill", "submit", "press", "select", "stop before", "check the page", "inspect the page"];
@@ -44,7 +47,7 @@ export function loadPluginConfig(env = process.env) {
   const webMode = env.LUMON_PLUGIN_WEB_MODE === "delegate_playwright" ? "delegate_playwright" : DEFAULT_WEB_MODE;
   return {
     backendOrigin: env.LUMON_PLUGIN_BACKEND_ORIGIN || DEFAULT_BACKEND_ORIGIN,
-    frontendOrigin: env.LUMON_PLUGIN_FRONTEND_ORIGIN || DEFAULT_FRONTEND_ORIGIN,
+    frontendOrigin: env.LUMON_PLUGIN_FRONTEND_ORIGIN || env.LUMON_PLUGIN_BACKEND_ORIGIN || DEFAULT_FRONTEND_ORIGIN,
     webMode,
     autoDelegate: env.LUMON_PLUGIN_AUTO_DELEGATE === "1" || env.LUMON_PLUGIN_AUTO_DELEGATE === "true",
     openPolicy: env.LUMON_PLUGIN_OPEN_POLICY || DEFAULT_OPEN_POLICY,
@@ -57,6 +60,7 @@ export function loadPluginConfig(env = process.env) {
     browserEpisodeGapMs: Number(env.LUMON_PLUGIN_BROWSER_EPISODE_GAP_MS || DEFAULT_BROWSER_EPISODE_GAP_MS),
     interventionEpisodeGapMs: Number(env.LUMON_PLUGIN_INTERVENTION_EPISODE_GAP_MS || DEFAULT_INTERVENTION_EPISODE_GAP_MS),
     reopenCooldownMs: Number(env.LUMON_PLUGIN_REOPEN_COOLDOWN_MS || DEFAULT_REOPEN_COOLDOWN_MS),
+    browserCommandTimeoutMs: Number(env.LUMON_PLUGIN_BROWSER_COMMAND_TIMEOUT_MS || DEFAULT_BROWSER_COMMAND_TIMEOUT_MS),
     enablePromptSteering:
       env.LUMON_PLUGIN_ENABLE_PROMPT_STEERING == null
         ? DEFAULT_ENABLE_PROMPT_STEERING
@@ -69,23 +73,39 @@ export function eventTypeOf(event) {
   return String(event.type || event.name || event.event || "");
 }
 
-function collectStringValues(value, bucket, depth = 0) {
-  if (depth > 4 || bucket.length > 64 || value == null) return;
-  if (typeof value === "string") {
-    bucket.push(value);
-    return;
+function firstNonEmptyString(...candidates) {
+  for (const value of candidates) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
   }
-  if (typeof value === "number" || typeof value === "boolean") {
-    bucket.push(String(value));
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) collectStringValues(entry, bucket, depth + 1);
-    return;
-  }
-  if (typeof value === "object") {
-    for (const entry of Object.values(value)) collectStringValues(entry, bucket, depth + 1);
-  }
+  return null;
+}
+
+function buildOpenSignalKey(event, signal, fallbackUrl = "") {
+  const identity = firstNonEmptyString(
+    event?.checkpoint_id,
+    event?.payload?.checkpoint_id,
+    event?.event_id,
+    event?.payload?.event_id,
+    event?.source_event_id,
+    event?.payload?.source_event_id,
+    event?.tool?.name && event?.tool?.url ? `${event.tool.name}:${event.tool.url}` : null,
+    event?.payload?.tool?.name && event?.payload?.tool?.url
+      ? `${event.payload.tool.name}:${event.payload.tool.url}`
+      : null,
+    event?.tool?.name,
+    event?.payload?.tool?.name,
+    event?.url,
+    event?.payload?.url,
+    event?.message,
+    event?.payload?.message,
+    event?.summary,
+    event?.payload?.summary_text,
+    extractSessionId(event),
+    fallbackUrl,
+  );
+  return `${signal}:${eventTypeOf(event)}:${identity || fallbackUrl || "unknown"}`;
 }
 
 function findNestedByKey(value, keys, depth = 0) {
@@ -250,9 +270,6 @@ export function isAttachRelevantEvent(event) {
 function hasStructuredIntervention(event) {
   if (!event || typeof event !== "object") return false;
   const eventType = eventTypeOf(event).toLowerCase();
-  if (eventType.includes("permission")) {
-    return true;
-  }
   if (eventType === "approval_required" || eventType === "bridge_offer") {
     return true;
   }
@@ -274,6 +291,68 @@ function hasStructuredIntervention(event) {
   return false;
 }
 
+function hasStructuredBrowserSignal(event) {
+  if (!event || typeof event !== "object") return false;
+  const eventType = eventTypeOf(event).toLowerCase();
+
+  if (eventType.includes("browser") || eventType.includes("webfetch")) {
+    return true;
+  }
+
+  const toolCandidates = [
+    event.tool?.name,
+    event.payload?.tool?.name,
+    event.payload?.tool_name,
+    event.payload?.name,
+  ];
+  for (const candidate of toolCandidates) {
+    if (typeof candidate === "string" && BROWSER_TOKENS.some((token) => candidate.toLowerCase().includes(token))) {
+      return true;
+    }
+  }
+
+  const commandCandidates = [
+    event.command,
+    event.command_name,
+    event.payload?.command,
+    event.payload?.command_name,
+    event.payload?.browser_command,
+  ];
+  for (const candidate of commandCandidates) {
+    if (typeof candidate === "string" && INTERACTIVE_BROWSER_VERBS.some((token) => candidate.toLowerCase().includes(token))) {
+      return true;
+    }
+  }
+
+  const urlCandidates = [
+    event.open_url,
+    event.source_url,
+    event.url,
+    event.payload?.open_url,
+    event.payload?.source_url,
+    event.payload?.url,
+    event.browser_context?.url,
+    event.payload?.browser_context?.url,
+  ];
+  for (const candidate of urlCandidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0 && candidate !== "about:blank") {
+      return true;
+    }
+  }
+
+  if (Array.isArray(event.actionable_elements) && event.actionable_elements.length > 0) {
+    return true;
+  }
+  if (Array.isArray(event.payload?.actionable_elements) && event.payload.actionable_elements.length > 0) {
+    return true;
+  }
+  if (event.evidence?.frame_emitted === true || event.payload?.evidence?.frame_emitted === true) {
+    return true;
+  }
+
+  return false;
+}
+
 export function shouldOpenForEvent(event, openPolicy = DEFAULT_OPEN_POLICY) {
   if (openPolicy === "never") return false;
   if (openPolicy === "always") return true;
@@ -287,59 +366,53 @@ export function shouldOpenForEvent(event, openPolicy = DEFAULT_OPEN_POLICY) {
   if (hasStructuredIntervention(event)) {
     return true;
   }
-  return BROWSER_TOKENS.some((token) => eventType.includes(token));
+  return hasStructuredBrowserSignal(event) || BROWSER_TOKENS.some((token) => eventType.includes(token));
 }
 
 export function classifyOpenSignal(event) {
   const eventType = eventTypeOf(event).toLowerCase();
-  const values = [];
-  collectStringValues(event, values);
-  const haystack = values.join(" ").toLowerCase();
 
   if (hasStructuredIntervention(event)) {
     return "intervention";
+  }
+  if (hasStructuredBrowserSignal(event)) {
+    return "browser";
   }
   if (BROWSER_TOKENS.some((token) => eventType.includes(token))) {
     return "browser";
   }
   return null;
 }
-
-export function classifyOpenSignalWithTextFallback(event) {
-  const eventType = eventTypeOf(event).toLowerCase();
-  const values = [];
-  collectStringValues(event, values);
-  const haystack = values.join(" ").toLowerCase();
-
-  if (hasStructuredIntervention(event)) {
-    return "intervention";
-  }
-  if (BROWSER_TOKENS.some((token) => eventType.includes(token))) {
-    return "browser";
-  }
-  if (BROWSER_TOKENS.some((token) => haystack.includes(token))) {
-    return "browser";
-  }
-  return null;
-}
-
 function shouldOpenForBrowserCommandResult(result) {
   if (!result || typeof result !== "object") return false;
   if (result.intervention_id || result.status === "blocked") {
     return true;
   }
   if (result.command === "begin_task") {
-    return false;
+    return Boolean(result.evidence?.frame_emitted || result.evidence?.verified);
   }
   return Boolean(result.evidence?.frame_emitted);
 }
 
 export function isTerminalEvent(event) {
   const eventType = eventTypeOf(event).toLowerCase();
-  const values = [];
-  collectStringValues(event, values);
-  const haystack = values.join(" ").toLowerCase();
-  return eventType.includes("completed") || eventType.includes("finished") || eventType.includes("stopped") || eventType.includes("failed") || haystack.includes("session complete") || haystack.includes("session finished");
+  if (/(^|\.)(completed|finished|stopped|failed)$/.test(eventType)) {
+    return true;
+  }
+
+  if (!eventType.startsWith("session.")) {
+    return false;
+  }
+
+  const terminalSessionStates = [
+    event.session?.state,
+    event.session?.status,
+    event.payload?.session?.state,
+    event.payload?.session?.status,
+  ];
+  return terminalSessionStates.some(
+    (candidate) => typeof candidate === "string" && ["completed", "finished", "stopped", "failed"].includes(candidate.toLowerCase()),
+  );
 }
 
 export function buildAttachPayload({ event, config, directory }) {
@@ -358,7 +431,7 @@ function isRecoverableStartupError(message) {
   );
 }
 
-export async function attachWithAutoStart({ attach, startApp, waitForHealth, payload, config, log = () => {} }) {
+export async function attachWithAutoStart({ attach, startApp, waitForHealth, payload, config, log = () => {}, onAutoStartComplete = null }) {
   debugTrace("attachWithAutoStart.begin", { observedSessionId: payload?.observed_session_id, webMode: config?.webMode });
   try {
     return await attach(payload);
@@ -372,10 +445,14 @@ export async function attachWithAutoStart({ attach, startApp, waitForHealth, pay
     }
     await log("Lumon backend unavailable; starting Lumon services.");
     try {
+      const startupStartedAt = Date.now();
       debugTrace("attachWithAutoStart.starting_app");
       await startApp();
       debugTrace("attachWithAutoStart.waiting_for_health");
       await waitForHealth();
+      if (typeof onAutoStartComplete === "function") {
+        await onAutoStartComplete({ startupLatencyMs: Date.now() - startupStartedAt });
+      }
       debugTrace("attachWithAutoStart.retry_attach");
       return await attach(payload);
     } catch (startupError) {
@@ -386,7 +463,7 @@ export async function attachWithAutoStart({ attach, startApp, waitForHealth, pay
   }
 }
 
-export async function browserCommandWithAutoStart({ command, startApp, waitForHealth, payload, config, log = () => {} }) {
+export async function browserCommandWithAutoStart({ command, startApp, waitForHealth, payload, config, log = () => {}, onAutoStartComplete = null }) {
   debugTrace("browserCommandWithAutoStart.begin", { command: payload?.command, commandId: payload?.command_id });
   try {
     return await command(payload);
@@ -398,8 +475,12 @@ export async function browserCommandWithAutoStart({ command, startApp, waitForHe
       throw error;
     }
     await log("Lumon backend unavailable; starting Lumon services.");
+    const startupStartedAt = Date.now();
     await startApp();
     await waitForHealth();
+    if (typeof onAutoStartComplete === "function") {
+      await onAutoStartComplete({ startupLatencyMs: Date.now() - startupStartedAt });
+    }
     return await command(payload);
   }
 }
@@ -411,14 +492,23 @@ export function createLumonController({
   startApp,
   waitForHealth,
   openUrl,
+  recordUiTelemetry = async () => {},
   log = async () => {},
   commandActivity = new Map(),
   pendingPromptSteering = new Map(),
+  activeBrowserTasks = new Map(),
 }) {
   const sessions = new Map();
   const inflight = new Map();
   let startupPromise = null;
   let recentDelegateFailures = 0;
+
+  const fireUiTelemetry = ({ sessionId, event, meta = {} }) => {
+    if (typeof recordUiTelemetry === "function") {
+      return recordUiTelemetry({ sessionId, event, meta, source: "plugin" });
+    }
+    return Promise.resolve();
+  };
 
   async function ensureStarted() {
     if (!startupPromise) {
@@ -441,6 +531,7 @@ export function createLumonController({
 
     const payload = buildAttachPayload({ event, config, directory });
     const previousSession = sessions.get(observedSessionId) || null;
+    let autoStartLatencyMs = null;
     const promise = attachWithAutoStart({
       attach,
       startApp: ensureStarted,
@@ -448,20 +539,35 @@ export function createLumonController({
       payload,
       config,
       log,
+      onAutoStartComplete: ({ startupLatencyMs }) => {
+        autoStartLatencyMs = startupLatencyMs;
+      },
     }).then((response) => {
       const session = {
         observedSessionId,
         lumonSessionId: response.session_id,
         openUrl: response.open_url,
         alreadyAttached: Boolean(response.already_attached),
+        uiConnected: response.ui_connected === true,
+        uiReadyAt: response.ui_ready_at || null,
         lastOpenedAt: previousSession?.lastOpenedAt || 0,
+        openInProgress: previousSession?.openInProgress || false,
         lastRelevantBrowserAt: previousSession?.lastRelevantBrowserAt || 0,
         lastRelevantInterventionAt: previousSession?.lastRelevantInterventionAt || 0,
         delegatePrimed: previousSession?.delegatePrimed || false,
         lastDelegatePrimeAt: previousSession?.lastDelegatePrimeAt || 0,
         attachedAt: Date.now(),
+        lastOpenSignalKey: previousSession?.lastOpenSignalKey || null,
+        lastOpenSignalAt: previousSession?.lastOpenSignalAt || 0,
       };
       sessions.set(observedSessionId, session);
+      if (typeof autoStartLatencyMs === "number") {
+        void fireUiTelemetry({
+          sessionId: response.session_id,
+          event: "auto_start_completed",
+          meta: { startup_latency_ms: autoStartLatencyMs, phase: "attach" },
+        });
+      }
       inflight.delete(observedSessionId);
       return session;
     }).catch((error) => {
@@ -477,15 +583,37 @@ export function createLumonController({
     const now = Date.now();
     const observedSessionId = extractSessionId(event);
     const relevant = isAttachRelevantEvent(event);
+    const signal = classifyOpenSignal(event);
+    const activeBrowserTask = observedSessionId ? activeBrowserTasks.get(observedSessionId) : null;
+    const browserTaskActive = Boolean(activeBrowserTask && typeof activeBrowserTask.expiresAt === "number" && activeBrowserTask.expiresAt > now);
+    if (observedSessionId && activeBrowserTask && !browserTaskActive) {
+      activeBrowserTasks.delete(observedSessionId);
+    }
     debugTrace("handleEvent", { eventType: eventTypeOf(event), observedSessionId, relevant });
-    if (relevant && observedSessionId) {
+    if (browserTaskActive && signal !== null) {
+      debugTrace("openSignal.suppressed_active_browser_task", {
+        observedSessionId,
+        signal,
+        eventType: eventTypeOf(event),
+        expiresAt: activeBrowserTask.expiresAt,
+      });
+      const runtimeSessionId = sessions.get(observedSessionId)?.lumonSessionId;
+      if (runtimeSessionId) {
+        void fireUiTelemetry({
+          sessionId: runtimeSessionId,
+          event: "open_suppressed",
+          meta: { reason_code: "active_browser_task", signal, event_type: eventTypeOf(event) },
+        });
+      }
+      return;
+    }
+    if (relevant && observedSessionId && (signal !== null || sessions.has(observedSessionId))) {
       await ensureAttached(event, directory);
     }
 
     if (!observedSessionId) return;
     const session = sessions.get(observedSessionId);
     if (session) {
-      const signal = classifyOpenSignal(event);
       const previousBrowserAt = session.lastRelevantBrowserAt;
       const previousInterventionAt = session.lastRelevantInterventionAt;
       const isBrowserSignal = signal === "browser";
@@ -522,6 +650,7 @@ export function createLumonController({
           return "Open and inspect the requested page in a live browser view.";
         })();
         try {
+          let autoStartLatencyMs = null;
           const result = await browserCommandWithAutoStart({
             command,
             startApp: ensureStarted,
@@ -535,7 +664,17 @@ export function createLumonController({
             },
             config,
             log,
+            onAutoStartComplete: ({ startupLatencyMs }) => {
+              autoStartLatencyMs = startupLatencyMs;
+            },
           });
+          if (typeof autoStartLatencyMs === "number") {
+            void fireUiTelemetry({
+              sessionId: session.lumonSessionId,
+              event: "auto_start_completed",
+              meta: { startup_latency_ms: autoStartLatencyMs, phase: "delegate_prime" },
+            });
+          }
           const primed =
             result &&
             (result.status === "success" ||
@@ -547,7 +686,31 @@ export function createLumonController({
           }
           if (result?.open_url && shouldOpenForBrowserCommandResult(result)) {
             session.lastOpenedAt = now;
-            await openUrl(result.open_url);
+            void fireUiTelemetry({
+              sessionId: session.lumonSessionId,
+              event: "open_requested",
+              meta: { reason_code: "delegate_prime", signal: "browser", command: "begin_task" },
+            });
+            try {
+              await openUrl(result.open_url);
+              void fireUiTelemetry({
+                sessionId: session.lumonSessionId,
+                event: "open_completed",
+                meta: { reason_code: "delegate_prime", signal: "browser", command: "begin_task" },
+              });
+            } catch (openError) {
+              void fireUiTelemetry({
+                sessionId: session.lumonSessionId,
+                event: "open_failed",
+                meta: {
+                  reason_code: "delegate_prime",
+                  signal: "browser",
+                  command: "begin_task",
+                  message: String(openError?.message || openError || ""),
+                },
+              });
+              throw openError;
+            }
           }
         } catch (error) {
           await log(`Lumon delegate priming failed: ${String(error?.message || error || "unknown error")}`);
@@ -567,6 +730,7 @@ export function createLumonController({
       if (canOpenForSignal && shouldOpenForEvent(event, config.openPolicy)) {
         const episodeGapMs = isInterventionSignal ? config.interventionEpisodeGapMs : config.browserEpisodeGapMs;
         const previousRelevantAt = isInterventionSignal ? previousInterventionAt : previousBrowserAt;
+        const openSignalKey = buildOpenSignalKey(event, signal, session.openUrl);
         const reopenCooldownMs = isInterventionSignal
           ? Math.min(config.reopenCooldownMs, config.interventionEpisodeGapMs)
           : config.reopenCooldownMs;
@@ -587,7 +751,26 @@ export function createLumonController({
           reopenCooldownMs,
         });
 
-        if ((session.lastOpenedAt === 0 || isNewEpisode) && outsideCooldown) {
+        if (
+          openSignalKey &&
+          session.lastOpenSignalKey === openSignalKey &&
+          now - session.lastOpenSignalAt < OPEN_SIGNAL_DEDUPE_WINDOW_MS
+        ) {
+          debugTrace("openSignal.suppressed_duplicate_signal", {
+            observedSessionId,
+            signal,
+            eventType: eventTypeOf(event),
+            url: session.openUrl,
+          });
+          void fireUiTelemetry({
+            sessionId: session.lumonSessionId,
+            event: "open_suppressed",
+            meta: { reason_code: "duplicate_signal", signal, event_type: eventTypeOf(event) },
+          });
+          return;
+        }
+
+        if ((session.lastOpenedAt === 0 || isNewEpisode) && outsideCooldown && !session.openInProgress) {
           const shouldRefreshAttachment =
             typeof session.attachedAt !== "number" ||
             now - session.attachedAt >= Math.max(config.reopenCooldownMs, 15000);
@@ -595,10 +778,35 @@ export function createLumonController({
             ? await ensureAttached(event, directory, { forceRefresh: true })
             : null;
           const openTarget = refreshedSession || session;
+          if (openTarget.uiConnected === true && openTarget.openUrl === session.openUrl) {
+            void fireUiTelemetry({
+              sessionId: openTarget.lumonSessionId,
+              event: "open_suppressed",
+              meta: { reason_code: "already_visible", signal, event_type: eventTypeOf(event) },
+            });
+            return;
+          }
           session.lastOpenedAt = now;
+          openTarget.lastOpenedAt = now;
+          session.lastOpenSignalKey = openSignalKey;
+          session.lastOpenSignalAt = now;
+          openTarget.lastOpenSignalKey = openSignalKey;
+          openTarget.lastOpenSignalAt = now;
+          session.openInProgress = true;
+          openTarget.openInProgress = true;
           debugTrace("openSignal.opening", { observedSessionId, signal, url: openTarget.openUrl });
+          void fireUiTelemetry({
+            sessionId: openTarget.lumonSessionId,
+            event: "open_requested",
+            meta: { reason_code: signal, signal, event_type: eventTypeOf(event) },
+          });
           try {
             await openUrl(openTarget.openUrl);
+            void fireUiTelemetry({
+              sessionId: openTarget.lumonSessionId,
+              event: "open_completed",
+              meta: { reason_code: signal, signal, event_type: eventTypeOf(event) },
+            });
           } catch (error) {
             debugTrace("openSignal.open_failed", {
               observedSessionId,
@@ -606,8 +814,44 @@ export function createLumonController({
               url: openTarget.openUrl,
               message: String(error?.message || error || ""),
             });
+            void fireUiTelemetry({
+              sessionId: openTarget.lumonSessionId,
+              event: "open_failed",
+              meta: {
+                reason_code: signal,
+                signal,
+                event_type: eventTypeOf(event),
+                message: String(error?.message || error || ""),
+              },
+            });
             await log(`Lumon observed browser work but could not open the UI automatically. Open Lumon manually if needed: ${openTarget.openUrl}`);
+          } finally {
+            session.openInProgress = false;
+            openTarget.openInProgress = false;
           }
+        } else if ((session.lastOpenedAt === 0 || isNewEpisode) && outsideCooldown && session.openInProgress) {
+          debugTrace("openSignal.suppressed_open_in_progress", {
+            observedSessionId,
+            signal,
+            eventType: eventTypeOf(event),
+          });
+          void fireUiTelemetry({
+            sessionId: session.lumonSessionId,
+            event: "open_suppressed",
+            meta: { reason_code: "open_in_progress", signal, event_type: eventTypeOf(event) },
+          });
+        } else if (!outsideCooldown) {
+          void fireUiTelemetry({
+            sessionId: session.lumonSessionId,
+            event: "open_suppressed",
+            meta: { reason_code: "cooldown", signal, event_type: eventTypeOf(event) },
+          });
+        } else if (session.lastOpenedAt !== 0 && !isNewEpisode) {
+          void fireUiTelemetry({
+            sessionId: session.lumonSessionId,
+            event: "open_suppressed",
+            meta: { reason_code: "same_episode", signal, event_type: eventTypeOf(event) },
+          });
         }
       } else if (isBrowserSignal && recentToolBrowserActivity) {
         debugTrace("openSignal.suppressed_tool_active", {
@@ -615,11 +859,21 @@ export function createLumonController({
           eventType: eventTypeOf(event),
           lastCommandAt: toolActivity.lastCommandAt,
         });
+        void fireUiTelemetry({
+          sessionId: session.lumonSessionId,
+          event: "open_suppressed",
+          meta: { reason_code: "tool_active", signal: "browser", event_type: eventTypeOf(event) },
+        });
       } else if (isBrowserSignal && pendingPromptActive) {
         debugTrace("openSignal.suppressed_pending_tool", {
           observedSessionId,
           eventType: eventTypeOf(event),
           pendingPromptUntil,
+        });
+        void fireUiTelemetry({
+          sessionId: session.lumonSessionId,
+          event: "open_suppressed",
+          meta: { reason_code: "pending_tool", signal: "browser", event_type: eventTypeOf(event) },
         });
       }
     }
@@ -644,20 +898,21 @@ function createRuntimeHelpers({ $, directory, client, config }) {
   const attachUrl = `${config.backendOrigin}/api/local/observe/opencode`;
   const browserCommandUrl = `${config.backendOrigin}/api/local/opencode/browser/command`;
   const frontendUrl = config.frontendOrigin;
-
-  const fetchOk = async (url) => {
-    try {
-      const response = await fetch(url);
-      return response.ok;
-    } catch {
-      return false;
-    }
-  };
+  const frontendServedByBackend = frontendUrl.replace(/\/$/, "") === config.backendOrigin.replace(/\/$/, "");
+  const frontendReadyUrl = frontendServedByBackend ? `${config.backendOrigin}/__lumon_frontend_ready__` : frontendUrl;
+  const uiTelemetryUrl = (sessionId) => `${config.backendOrigin}/api/local/session/${encodeURIComponent(sessionId)}/ui-telemetry`;
+  let telemetryCapabilityWarningShown = false;
 
   const fetchFrontendReady = async () => {
     try {
-      const response = await fetch(frontendUrl);
+      const response = await fetch(frontendReadyUrl);
       if (!response.ok) return false;
+      if (frontendServedByBackend) {
+        const payload = typeof response.json === "function" ? await response.json() : null;
+        const frontendRuntimeVersion = payload?.frontend_runtime_version || payload?.runtime_version;
+        const frontendFeatures = payload?.frontend_features || {};
+        return frontendRuntimeVersion === EXPECTED_RUNTIME_VERSION && frontendFeatures.ui_telemetry === true;
+      }
       const text = typeof response.text === "function" ? await response.text() : "";
       const normalized = String(text || "");
       return normalized.includes("Lumon") || normalized.includes('id="root"') || normalized.includes("id='root'");
@@ -690,6 +945,9 @@ function createRuntimeHelpers({ $, directory, client, config }) {
         `Stale Lumon backend detected (${payload.runtime_version || "unknown"}). Run \`./lumon restart\` so the plugin and backend are on the same runtime version.`,
       );
     }
+    if (payload.runtime_features?.ui_telemetry !== true || payload.runtime_features?.live_artifact_persistence !== true) {
+      throw new Error("Stale Lumon backend detected (missing eval capabilities). Run `./lumon restart` so Lumon can measure trust, clarity, and latency correctly.");
+    }
     return payload;
   };
 
@@ -697,6 +955,43 @@ function createRuntimeHelpers({ $, directory, client, config }) {
     debugTrace("plugin.log", { message });
     if (client?.app?.log) {
       await client.app.log(`[lumon] ${message}`);
+    }
+  };
+
+  const recordUiTelemetry = async ({ sessionId, event, meta = {}, source = "plugin" }) => {
+    if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+      return;
+    }
+    try {
+      const response = await fetch(uiTelemetryUrl(sessionId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event,
+          source,
+          timestamp: new Date().toISOString(),
+          meta,
+        }),
+      });
+      if (!response.ok) {
+        const body = typeof response.text === "function" ? await response.text() : "";
+        debugTrace("uiTelemetry.error", {
+          sessionId,
+          event,
+          status: response.status,
+          body,
+        });
+        if (!telemetryCapabilityWarningShown) {
+          telemetryCapabilityWarningShown = true;
+          await log("Lumon runtime is missing telemetry support for this browser session. Run `./lumon restart` before trusting eval data.");
+        }
+      }
+    } catch (error) {
+      debugTrace("uiTelemetry.error", {
+        sessionId,
+        event,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 
@@ -746,11 +1041,30 @@ function createRuntimeHelpers({ $, directory, client, config }) {
   const command = async (payload) => {
     await verifyBackendVersion();
     debugTrace("browserCommand.request", { command: payload?.command, commandId: payload?.command_id });
-    const response = await fetch(browserCommandUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timeoutHandle = controller
+      ? setTimeout(() => controller.abort(new Error("browser_command_timeout")), config.browserCommandTimeoutMs)
+      : null;
+    let response;
+    try {
+      response = await fetch(browserCommandUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+    } catch (error) {
+      debugTrace("browserCommand.transport_error", {
+        command: payload?.command,
+        commandId: payload?.command_id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
     let bodyText = "";
     let parsed = null;
     if (typeof response.text === "function") {
@@ -800,6 +1114,10 @@ function createRuntimeHelpers({ $, directory, client, config }) {
   };
 
   const startFrontend = async () => {
+    if (frontendServedByBackend) {
+      debugTrace("startFrontend.skipped_backend_served", { frontendUrl, backendOrigin: config.backendOrigin });
+      return true;
+    }
     const command = [
       "cd",
       JSON.stringify(runtimeDirectory),
@@ -851,24 +1169,54 @@ function createRuntimeHelpers({ $, directory, client, config }) {
     await log(`Open Lumon manually: ${url}`);
   };
 
-  return { attach, command, startApp, waitForHealth, openUrl, log, directory: runtimeDirectory };
+  return { attach, command, startApp, waitForHealth, openUrl, log, recordUiTelemetry, directory: runtimeDirectory };
 }
 
 function createLumonBrowserTool({ config, helpers }) {
   const sessionOpenState = new Map();
   const repeatedFrameMissing = new Map();
+  const runtimeSessionIds = new Map();
+  const visibleRuntimeSessions = new Set();
 
-  const maybeOpenUrl = async ({ sessionId, result, commandName }) => {
+  const fireUiTelemetry = ({ sessionId, event, meta = {} }) => {
+    if (typeof helpers.recordUiTelemetry === "function") {
+      return helpers.recordUiTelemetry({ sessionId, event, meta, source: "plugin" });
+    }
+    return Promise.resolve();
+  };
+
+  const markBrowserTaskActive = (sessionId) => {
+    if (!helpers.activeBrowserTasks || typeof sessionId !== "string" || sessionId.trim().length === 0) {
+      return;
+    }
+    helpers.activeBrowserTasks.set(sessionId, {
+      source: "lumon_browser",
+      expiresAt: Date.now() + ACTIVE_BROWSER_TASK_WINDOW_MS,
+    });
+  };
+
+  const clearBrowserTaskActive = (sessionId) => {
+    if (!helpers.activeBrowserTasks || typeof sessionId !== "string" || sessionId.trim().length === 0) {
+      return;
+    }
+    helpers.activeBrowserTasks.delete(sessionId);
+  };
+
+  const maybeOpenUrl = async ({ stateKey, telemetrySessionId, result, commandName, uiConnected = false }) => {
     const url = result?.open_url;
-    if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+    if (typeof stateKey !== "string" || stateKey.trim().length === 0) {
       return;
     }
     if (typeof url !== "string" || url.trim().length === 0) {
       return;
     }
+    const resolvedTelemetrySessionId =
+      typeof telemetrySessionId === "string" && telemetrySessionId.trim().length > 0
+        ? telemetrySessionId
+        : stateKey;
     const now = Date.now();
     const isIntervention = Boolean(result?.intervention_id || result?.status === "blocked");
-    const state = sessionOpenState.get(sessionId) || {
+    const state = sessionOpenState.get(stateKey) || {
       taskSequence: 0,
       openedTaskSequence: 0,
       lastOpenedAt: 0,
@@ -880,6 +1228,24 @@ function createLumonBrowserTool({ config, helpers }) {
       state.taskSequence = 1;
     }
 
+    const alreadyVisible = uiConnected || visibleRuntimeSessions.has(resolvedTelemetrySessionId);
+
+    if (!isIntervention && alreadyVisible && state.lastOpenedUrl === url) {
+      debugTrace("toolOpen.suppressed_already_visible", {
+        stateKey,
+        sessionId: resolvedTelemetrySessionId,
+        command: commandName,
+        url,
+      });
+      void fireUiTelemetry({
+        sessionId: resolvedTelemetrySessionId,
+        event: "open_suppressed",
+        meta: { reason_code: "already_visible", command: commandName },
+      });
+      sessionOpenState.set(stateKey, state);
+      return;
+    }
+
     if (
       isIntervention &&
       state.openedTaskSequence === state.taskSequence &&
@@ -887,12 +1253,17 @@ function createLumonBrowserTool({ config, helpers }) {
       now - state.lastOpenedAt < config.reopenCooldownMs
     ) {
       debugTrace("toolOpen.suppressed_active_intervention_session", {
-        sessionId,
+        sessionId: resolvedTelemetrySessionId,
         command: commandName,
         url,
         taskSequence: state.taskSequence,
       });
-      sessionOpenState.set(sessionId, state);
+      void fireUiTelemetry({
+        sessionId: resolvedTelemetrySessionId,
+        event: "open_suppressed",
+        meta: { reason_code: "active_intervention_session", command: commandName },
+      });
+      sessionOpenState.set(stateKey, state);
       return;
     }
 
@@ -907,23 +1278,33 @@ function createLumonBrowserTool({ config, helpers }) {
         now - state.lastOpenedAt < config.reopenCooldownMs
       ) {
         debugTrace("toolOpen.suppressed_duplicate_intervention", {
-          sessionId,
+          sessionId: resolvedTelemetrySessionId,
           command: commandName,
           interventionKey,
           url,
         });
-        sessionOpenState.set(sessionId, state);
+        void fireUiTelemetry({
+          sessionId: resolvedTelemetrySessionId,
+          event: "open_suppressed",
+          meta: { reason_code: "duplicate_intervention", command: commandName },
+        });
+        sessionOpenState.set(stateKey, state);
         return;
       }
       state.lastInterventionKey = interventionKey;
     } else if (state.openedTaskSequence === state.taskSequence) {
       debugTrace("toolOpen.suppressed_active_session", {
-        sessionId,
+        sessionId: resolvedTelemetrySessionId,
         command: commandName,
         url,
         taskSequence: state.taskSequence,
       });
-      sessionOpenState.set(sessionId, state);
+      void fireUiTelemetry({
+        sessionId: resolvedTelemetrySessionId,
+        event: "open_suppressed",
+        meta: { reason_code: "active_session", command: commandName },
+      });
+      sessionOpenState.set(stateKey, state);
       return;
     }
 
@@ -932,15 +1313,34 @@ function createLumonBrowserTool({ config, helpers }) {
     if (!isIntervention) {
       state.openedTaskSequence = state.taskSequence;
     }
-    sessionOpenState.set(sessionId, state);
+    sessionOpenState.set(stateKey, state);
     try {
+      void fireUiTelemetry({
+        sessionId: resolvedTelemetrySessionId,
+        event: "open_requested",
+        meta: { reason_code: isIntervention ? "intervention" : commandName, command: commandName },
+      });
       await helpers.openUrl(url);
+      void fireUiTelemetry({
+        sessionId: resolvedTelemetrySessionId,
+        event: "open_completed",
+        meta: { reason_code: isIntervention ? "intervention" : commandName, command: commandName },
+      });
     } catch (error) {
       debugTrace("toolOpen.open_failed", {
-        sessionId,
+        sessionId: resolvedTelemetrySessionId,
         command: commandName,
         url,
         message: String(error?.message || error || ""),
+      });
+      void fireUiTelemetry({
+        sessionId: resolvedTelemetrySessionId,
+        event: "open_failed",
+        meta: {
+          reason_code: isIntervention ? "intervention" : commandName,
+          command: commandName,
+          message: String(error?.message || error || ""),
+        },
       });
       await helpers.log(
         `Lumon completed the browser step but could not open the UI automatically. Open Lumon manually if needed: ${url}`,
@@ -956,7 +1356,7 @@ function createLumonBrowserTool({ config, helpers }) {
         .enum(["begin_task", "status", "inspect", "open", "click", "type", "scroll", "wait", "stop"])
         .describe("Browser command to execute."),
       task_text: tool.schema.string().optional().describe("Natural-language task context for this browser step."),
-      url: tool.schema.string().optional().describe("URL to open for command=open."),
+      url: tool.schema.string().optional().describe("URL to open for command=open, or the known starting page for command=begin_task."),
       element_id: tool.schema.string().optional().describe("Element id returned by inspect. Prefer this over selector."),
       selector: tool.schema.string().optional().describe("Internal fallback selector when no element_id exists."),
       text: tool.schema.string().optional().describe("Text to type for command=type."),
@@ -991,6 +1391,7 @@ function createLumonBrowserTool({ config, helpers }) {
         ...args,
         command_id: resolvedCommandId,
       };
+      markBrowserTaskActive(resolvedSessionId);
       if (helpers.commandActivity) {
         helpers.commandActivity.set(`${resolvedSessionId}`, {
           lastCommandAt: Date.now(),
@@ -1033,6 +1434,14 @@ function createLumonBrowserTool({ config, helpers }) {
         } else {
           repeatedFrameMissing.delete(repeatedKey);
         }
+        if (typeof result?.session_id === "string" && result.session_id.trim().length > 0) {
+          runtimeSessionIds.set(resolvedSessionId, result.session_id);
+          if (result.ui_connected === true) {
+            visibleRuntimeSessions.add(result.session_id);
+          } else if (result.ui_connected === false) {
+            visibleRuntimeSessions.delete(result.session_id);
+          }
+        }
         if (helpers.commandActivity) {
           helpers.commandActivity.set(repeatedKey, {
             lastCommandAt: Date.now(),
@@ -1040,11 +1449,16 @@ function createLumonBrowserTool({ config, helpers }) {
             lastReason: result?.reason ?? null,
           });
         }
+        if (args.command === "stop" && result?.status === "success") {
+          clearBrowserTaskActive(resolvedSessionId);
+        }
         if (result?.open_url && shouldOpenForBrowserCommandResult(result)) {
           await maybeOpenUrl({
-            sessionId: resolvedSessionId,
+            stateKey: resolvedSessionId,
+            telemetrySessionId: result?.session_id || runtimeSessionIds.get(resolvedSessionId) || resolvedSessionId,
             result,
             commandName: args.command,
+            uiConnected: result?.ui_connected === true,
           });
         }
         if (typeof context?.metadata === "function") {
@@ -1101,7 +1515,8 @@ export function createLumonPlugin(input) {
   const helpers = createRuntimeHelpers({ $, directory, client, config });
   const commandActivity = new Map();
   const pendingPromptSteering = new Map();
-  const controller = createLumonController({ config, ...helpers, commandActivity, pendingPromptSteering });
+  const activeBrowserTasks = new Map();
+  const controller = createLumonController({ config, ...helpers, commandActivity, pendingPromptSteering, activeBrowserTasks });
 
   return (async () => {
     debugTrace("plugin.init", { directory, webMode: config.webMode });
@@ -1111,7 +1526,7 @@ export function createLumonPlugin(input) {
         await controller.handleEvent(event, directory);
       },
       tool: {
-        lumon_browser: createLumonBrowserTool({ config, helpers: { ...helpers, commandActivity, pendingPromptSteering } }),
+        lumon_browser: createLumonBrowserTool({ config, helpers: { ...helpers, commandActivity, pendingPromptSteering, activeBrowserTasks } }),
       },
       "tool.definition": async (input, output) => {
         if (input.toolID !== "lumon_browser") {
@@ -1130,6 +1545,10 @@ export function createLumonPlugin(input) {
         const sessionId = resolveSessionIdForPromptSteering(_input, output);
         if (sessionId) {
           pendingPromptSteering.set(sessionId, Date.now() + 15000);
+          activeBrowserTasks.set(sessionId, {
+            source: "prompt_steering",
+            expiresAt: Date.now() + ACTIVE_BROWSER_TASK_WINDOW_MS,
+          });
           debugTrace("chat.message.pending_tool", { sessionId, promptText });
         } else {
           debugTrace("chat.message.pending_tool_missing_session", { promptText });
