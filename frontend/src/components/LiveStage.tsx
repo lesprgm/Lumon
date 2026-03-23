@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AdapterCapabilities,
@@ -6,17 +6,24 @@ import type {
   AnyClientEnvelope,
   BrowserContextPayload,
   InteractionMode,
+  UiTelemetryPayload,
 } from "../protocol/types";
+import { readStoredSpriteFamily } from "../lib/spriteSelection";
 import type { SceneSnapshot } from "../overlay/engine/overlayEngine";
+import { getSpriteSet, SpritePlayer } from "../overlay/sprites";
+import type { LumonSessionState, SpriteRuntimeInput } from "../overlay/sprites";
+import { resolveSpriteAssetPath } from "../overlay/sprites/spriteLoader";
 import { scaleRect, scaleX, scaleY, unscaleX, unscaleY } from "./stageMath";
 import type { ActiveIntervention } from "../store/sessionStore";
 
-const MAIN_SPRITE_WIDTH = 34;
+const MAIN_SPRITE_WIDTH = 40;
 const MAIN_SPRITE_X_OFFSET = MAIN_SPRITE_WIDTH / 2;
-const MAIN_SPRITE_Y_OFFSET = 42;
-const SUBAGENT_SPRITE_WIDTH = 20;
+const MAIN_SPRITE_Y_OFFSET = 32;
+const SUBAGENT_SPRITE_WIDTH = 38;
 const SUBAGENT_SPRITE_X_OFFSET = SUBAGENT_SPRITE_WIDTH / 2;
-const SUBAGENT_SPRITE_Y_OFFSET = 24;
+const SUBAGENT_SPRITE_Y_OFFSET = 28;
+
+type StageDimensions = { width: number; height: number };
 
 function cueToneForAction(actionType: AgentEventPayload["action_type"] | null): "neutral" | "click" | "type" | "read" | "success" | "error" {
   if (actionType === "click") return "click";
@@ -27,27 +34,6 @@ function cueToneForAction(actionType: AgentEventPayload["action_type"] | null): 
   return "neutral";
 }
 
-function drawCornerFocus(ctx: CanvasRenderingContext2D, rect: { x: number; y: number; width: number; height: number }, color: string): void {
-  const corner = Math.min(12, rect.width / 4, rect.height / 4);
-  ctx.save();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.3;
-  ctx.beginPath();
-  ctx.moveTo(rect.x, rect.y + corner);
-  ctx.lineTo(rect.x, rect.y);
-  ctx.lineTo(rect.x + corner, rect.y);
-  ctx.moveTo(rect.x + rect.width - corner, rect.y);
-  ctx.lineTo(rect.x + rect.width, rect.y);
-  ctx.lineTo(rect.x + rect.width, rect.y + corner);
-  ctx.moveTo(rect.x, rect.y + rect.height - corner);
-  ctx.lineTo(rect.x, rect.y + rect.height);
-  ctx.lineTo(rect.x + corner, rect.y + rect.height);
-  ctx.moveTo(rect.x + rect.width - corner, rect.y + rect.height);
-  ctx.lineTo(rect.x + rect.width, rect.y + rect.height);
-  ctx.lineTo(rect.x + rect.width, rect.y + rect.height - corner);
-  ctx.stroke();
-  ctx.restore();
-}
 
 function motionClassForSnapshot(snapshot: SceneSnapshot): string {
   if (snapshot.sessionState === "failed") {
@@ -101,15 +87,128 @@ function browserContextLabel(environmentType: BrowserContextPayload["environment
   }
 }
 
+function resolveBootstrapRuntimeInput(snapshot: SceneSnapshot): SpriteRuntimeInput {
+  const sessionState: LumonSessionState =
+    snapshot.sessionState === "completed" ||
+    snapshot.sessionState === "failed" ||
+    snapshot.sessionState === "stopped" ||
+    snapshot.sessionState === "takeover" ||
+    snapshot.sessionState === "paused" ||
+    snapshot.sessionState === "pause_requested" ||
+    snapshot.sessionState === "waiting_for_approval" ||
+    snapshot.sessionState === "starting" ||
+    snapshot.sessionState === "idle"
+      ? snapshot.sessionState
+      : "running";
+  return {
+    sessionState,
+    actionType: snapshot.mainActionType ?? undefined,
+    isMoving: false,
+  };
+}
+
+function resolveBootstrapSpriteFramePath(player: SpritePlayer, snapshot: SceneSnapshot, nowMs: number): string {
+  return player.update(nowMs, resolveBootstrapRuntimeInput(snapshot)).framePath;
+}
+
+function buildBootstrapMainAgent(snapshot: SceneSnapshot, framePath: string): SceneSnapshot["mainAgent"] {
+  return {
+    id: "main_bootstrap",
+    x: 960,
+    y: 540,
+    framePath,
+    kind: "main",
+    summaryText: snapshot.caption || "Watching the page",
+    movementState: "anchored",
+  };
+}
+
+export function resolveMainSpriteStyle(
+  snapshot: Pick<SceneSnapshot, "mainAgent" | "targetRect" | "typing">,
+  stageDimensions: StageDimensions,
+): { left: number; top: number } | null {
+  if (!snapshot.mainAgent) {
+    return null;
+  }
+  if (snapshot.typing && snapshot.targetRect) {
+    return {
+      left: snapSpritePosition(scaleX(snapshot.targetRect.x, stageDimensions.width) - 6),
+      top: snapSpritePosition(scaleY(snapshot.targetRect.y, stageDimensions.height) - 50),
+    };
+  }
+  return {
+    left: snapSpritePosition(scaleX(snapshot.mainAgent.x, stageDimensions.width) - MAIN_SPRITE_X_OFFSET),
+    top: snapSpritePosition(scaleY(snapshot.mainAgent.y, stageDimensions.height) - MAIN_SPRITE_Y_OFFSET),
+  };
+}
+
+export function resolveCaptionLayout(
+  snapshot: Pick<SceneSnapshot, "fallbackMode" | "mainAgent"> & { targetPoint?: SceneSnapshot["targetPoint"] },
+  stageDimensions: StageDimensions,
+  mainStyle: { left: number; top: number } | null,
+): {
+  bubbleStyle: React.CSSProperties;
+  bubbleClassName: string;
+  tailStyle: React.CSSProperties;
+} | null {
+  if (!snapshot.mainAgent || !mainStyle) {
+    return null;
+  }
+
+  const anchorX = snapshot.targetPoint
+    ? scaleX(snapshot.targetPoint.x, stageDimensions.width)
+    : scaleX(snapshot.mainAgent.x, stageDimensions.width);
+  const anchorY = snapshot.targetPoint
+    ? scaleY(snapshot.targetPoint.y, stageDimensions.height)
+    : scaleY(snapshot.mainAgent.y, stageDimensions.height);
+
+  if (snapshot.fallbackMode) {
+    const bubbleWidth = Math.min(stageDimensions.width * 0.4, 400);
+    const bubbleLeft = stageDimensions.width / 2 - bubbleWidth / 2;
+    const bubbleTop = stageDimensions.height / 2 + 80;
+    return {
+      bubbleStyle: {
+        left: `${snapSpritePosition(bubbleLeft)}px`,
+        top: `${snapSpritePosition(bubbleTop)}px`,
+        width: `${bubbleWidth}px`,
+        textAlign: "center",
+      },
+      bubbleClassName: "caption-anchor is-hero-fallback-caption",
+      tailStyle: { display: "none" },
+    };
+  }
+
+  const placeRight = anchorX < stageDimensions.width * 0.62;
+  const bubbleWidth = Math.min(stageDimensions.width * 0.3, 288);
+  const horizontalOffset = placeRight ? 34 : -(bubbleWidth + 34);
+  const bubbleLeft = clampStagePosition(anchorX + horizontalOffset, 16, stageDimensions.width - bubbleWidth - 16);
+  const placeBelow = anchorY < 92;
+  const bubbleTop = clampStagePosition(anchorY + (placeBelow ? 18 : -50), 70, stageDimensions.height - 72);
+  return {
+    bubbleStyle: {
+      left: `${snapSpritePosition(bubbleLeft)}px`,
+      top: `${snapSpritePosition(bubbleTop)}px`,
+    },
+    bubbleClassName: `caption-anchor ${placeRight ? "is-right" : "is-left"} ${placeBelow ? "is-below" : "is-above"}`,
+    tailStyle: {
+      left: `${snapSpritePosition(anchorX)}px`,
+      top: `${snapSpritePosition(anchorY)}px`,
+    },
+  };
+}
+
 export function LiveStage({
   snapshot,
   onStageReady,
+  hasAgentActivity,
+  sessionId,
   adapterId,
   taskText,
   supportsFrames,
   videoStream,
   videoStatus,
   frameFps,
+  isNavigating,
   activeIntervention,
   browserContext,
   capabilities,
@@ -117,16 +216,20 @@ export function LiveStage({
   observerMode,
   reviewMode,
   onCommand,
+  onUiTelemetry,
   sessionStatus,
 }: {
   snapshot: SceneSnapshot;
   onStageReady: (ready: boolean) => void;
+  hasAgentActivity: boolean;
+  sessionId?: string;
   adapterId: string;
   taskText: string;
   supportsFrames: boolean;
   videoStream: MediaStream | null;
   videoStatus: "idle" | "connecting" | "connected" | "disconnected" | "failed" | "closed";
   frameFps: number | null;
+  isNavigating?: boolean;
   activeIntervention: ActiveIntervention | null;
   browserContext: BrowserContextPayload | null;
   capabilities: AdapterCapabilities | null;
@@ -134,18 +237,122 @@ export function LiveStage({
   observerMode: boolean;
   reviewMode: boolean;
   onCommand: (message: AnyClientEnvelope) => void;
+  onUiTelemetry?: (payload: UiTelemetryPayload) => void;
   sessionStatus?: string;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const mainSpriteRef = useRef<HTMLImageElement | null>(null);
+  const spriteTelemetrySentRef = useRef(false);
   const [hoverCelebration, setHoverCelebration] = useState(false);
+  const [takeoverCardCollapsed, setTakeoverCardCollapsed] = useState(false);
+  const [imageLoading, setImageLoading] = useState(false);
+  const [loadedFrameSrc, setLoadedFrameSrc] = useState<string | null>(null);
+  const [stageDimensions, setStageDimensions] = useState<StageDimensions | null>(null);
+
+  useEffect(() => {
+    if (snapshot.frameSrc && snapshot.frameSrc !== loadedFrameSrc) {
+      setImageLoading(true);
+    }
+  }, [snapshot.frameSrc, loadedFrameSrc]);
   const [videoFps, setVideoFps] = useState<number | null>(null);
 
-  const hasStageEvidence = Boolean(snapshot.frameSrc) || Boolean(videoStream) || Boolean(activeIntervention) || !supportsFrames;
+  const hasStageEvidence = Boolean(snapshot.frameSrc) || Boolean(videoStream) || Boolean(activeIntervention) || Boolean(hasAgentActivity) || !supportsFrames;
   const overlaySpritesDisabled = import.meta.env.VITE_LUMON_OVERLAY_SPRITES === "false";
   const renderSprites = reviewMode || !overlaySpritesDisabled;
+  const showStageSprites =
+    renderSprites && interactionMode !== "takeover" && activeIntervention?.kind !== "manual_control";
   const showVideo = Boolean(videoStream) && videoStatus !== "failed";
+  const isTakeoverInterventionActive =
+    (interactionMode === "takeover" || activeIntervention?.kind === "manual_control") &&
+    activeIntervention?.kind !== "approval";
+  const hasVisibleBrowserTarget =
+    Boolean(browserContext?.url) &&
+    browserContext?.url !== "about:blank" &&
+    browserContext?.domain !== "unknown";
+  const bootstrapSpriteSet = useMemo(() => getSpriteSet(readStoredSpriteFamily()), []);
+  const bootstrapPlayer = useMemo(
+    () => new SpritePlayer(bootstrapSpriteSet.manifest, bootstrapSpriteSet.assetBasePath),
+    [bootstrapSpriteSet.assetBasePath, bootstrapSpriteSet.manifest],
+  );
+  const [bootstrapFramePath, setBootstrapFramePath] = useState(() =>
+    resolveBootstrapSpriteFramePath(bootstrapPlayer, snapshot, performance.now()),
+  );
+  const bootstrapRuntimeInput = useMemo(() => resolveBootstrapRuntimeInput(snapshot), [snapshot]);
+
+  useEffect(() => {
+    bootstrapPlayer.syncToRuntime(bootstrapRuntimeInput, performance.now());
+  }, [bootstrapPlayer, bootstrapRuntimeInput]);
+
+  const bootstrapMainAgent = useMemo(() => {
+    if (snapshot.mainAgent || !showStageSprites || !hasVisibleBrowserTarget) {
+      return null;
+    }
+    if (!snapshot.frameSrc && !showVideo) {
+      return null;
+    }
+    return buildBootstrapMainAgent(snapshot, bootstrapFramePath);
+  }, [bootstrapFramePath, hasVisibleBrowserTarget, showStageSprites, showVideo, snapshot]);
+
+  useEffect(() => {
+    if (!bootstrapMainAgent) {
+      return;
+    }
+
+    let rafId = 0;
+
+    const animateBootstrap = () => {
+      const nextFramePath = resolveBootstrapSpriteFramePath(bootstrapPlayer, snapshot, performance.now());
+      setBootstrapFramePath((current) => (current === nextFramePath ? current : nextFramePath));
+      rafId = window.requestAnimationFrame(animateBootstrap);
+    };
+
+    animateBootstrap();
+
+    return () => {
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, [bootstrapMainAgent, bootstrapPlayer, snapshot]);
+
+  const stageSnapshot = useMemo(
+    () => (bootstrapMainAgent ? { ...snapshot, mainAgent: bootstrapMainAgent } : snapshot),
+    [bootstrapMainAgent, snapshot],
+  );
+
+  useLayoutEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) {
+      setStageDimensions(null);
+      return;
+    }
+
+    const updateDimensions = () => {
+      const rect = stage.getBoundingClientRect();
+      const next = { width: rect.width, height: rect.height };
+      setStageDimensions((current) => {
+        if (current && current.width === next.width && current.height === next.height) {
+          return current;
+        }
+        return next;
+      });
+    };
+
+    updateDimensions();
+
+    const resizeObserver = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => updateDimensions())
+      : null;
+    resizeObserver?.observe(stage);
+    window.addEventListener("resize", updateDimensions);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateDimensions);
+    };
+  }, [sessionId]);
 
   useEffect(() => {
     if (!videoRef.current) {
@@ -194,16 +401,7 @@ export function LiveStage({
       rafId = window.requestAnimationFrame(onVideoFrame);
     }
 
-  
-
-
-
-
-
-
-  return (
-
-) => {
+    return () => {
       if (rafId) {
         window.cancelAnimationFrame(rafId);
       }
@@ -218,205 +416,82 @@ export function LiveStage({
   }, [hasStageEvidence, onStageReady]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    const stage = stageRef.current;
-    if (!canvas || !stage) {
-      return;
-    }
-    const rect = stage.getBoundingClientRect();
-    const canvasWidth = rect.width;
-    const canvasHeight = rect.height;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    canvas.style.width = `${rect.width}px`;
-    canvas.style.height = `${rect.height}px`;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      return;
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const cueTone = cueToneForAction(snapshot.mainActionType);
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (snapshot.targetRect) {
-      const scaledRect = scaleRect(snapshot.targetRect, canvasWidth, canvasHeight);
-      if (cueTone === "type") {
-        ctx.save();
-        ctx.strokeStyle = "rgba(77, 171, 247, 0.54)";
-        ctx.lineWidth = 1.4;
-        ctx.shadowColor = "rgba(77, 171, 247, 0.14)";
-        ctx.shadowBlur = 8;
-        ctx.strokeRect(scaledRect.x, scaledRect.y, scaledRect.width, scaledRect.height);
-        ctx.beginPath();
-        ctx.moveTo(scaledRect.x + 6, scaledRect.y + scaledRect.height + 4);
-        ctx.lineTo(scaledRect.x + scaledRect.width - 6, scaledRect.y + scaledRect.height + 4);
-        ctx.stroke();
-        ctx.restore();
-      } else if (cueTone === "read") {
-        drawCornerFocus(ctx, scaledRect, "rgba(148, 163, 184, 0.5)");
-      } else if (cueTone === "success") {
-        ctx.save();
-        ctx.strokeStyle = "rgba(34, 197, 94, 0.42)";
-        ctx.lineWidth = 1.4;
-        ctx.shadowColor = "rgba(34, 197, 94, 0.14)";
-        ctx.shadowBlur = 8;
-        ctx.strokeRect(scaledRect.x, scaledRect.y, scaledRect.width, scaledRect.height);
-        ctx.restore();
-      } else if (cueTone === "error") {
-        ctx.save();
-        ctx.strokeStyle = "rgba(239, 68, 68, 0.42)";
-        ctx.lineWidth = 1.4;
-        ctx.shadowColor = "rgba(239, 68, 68, 0.14)";
-        ctx.shadowBlur = 8;
-        ctx.strokeRect(scaledRect.x, scaledRect.y, scaledRect.width, scaledRect.height);
-        ctx.restore();
-      } else {
-        ctx.save();
-        ctx.strokeStyle = "rgba(255, 208, 92, 0.24)";
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
-        ctx.shadowColor = "rgba(255, 208, 92, 0.12)";
-        ctx.shadowBlur = 6;
-        ctx.strokeRect(
-          scaledRect.x,
-          scaledRect.y,
-          scaledRect.width,
-          scaledRect.height,
-        );
-        ctx.restore();
-      }
-    }
-
-    if (snapshot.targetPoint) {
-      const x = scaleX(snapshot.targetPoint.x, canvasWidth);
-      const y = scaleY(snapshot.targetPoint.y, canvasHeight);
-      const markerStroke =
-        cueTone === "type"
-          ? "rgba(77, 171, 247, 0.96)"
-          : cueTone === "read"
-            ? "rgba(148, 163, 184, 0.86)"
-            : cueTone === "success"
-              ? "rgba(34, 197, 94, 0.94)"
-              : cueTone === "error"
-                ? "rgba(239, 68, 68, 0.94)"
-                : "rgba(255, 208, 92, 0.95)";
-      const markerFill =
-        cueTone === "type"
-          ? "rgba(239, 248, 255, 0.95)"
-          : cueTone === "read"
-            ? "rgba(248, 250, 252, 0.95)"
-            : cueTone === "success"
-              ? "rgba(240, 253, 244, 0.95)"
-              : cueTone === "error"
-                ? "rgba(254, 242, 242, 0.95)"
-                : "rgba(255, 245, 214, 0.95)";
-      ctx.save();
-      ctx.strokeStyle = markerStroke;
-      ctx.fillStyle = markerFill;
-      ctx.lineWidth = cueTone === "read" ? 1.1 : 1.25;
-      ctx.shadowColor = markerStroke.replace("0.95", "0.22").replace("0.96", "0.22").replace("0.94", "0.22").replace("0.86", "0.18");
-      ctx.shadowBlur = cueTone === "read" ? 6 : 8;
-      ctx.beginPath();
-      ctx.arc(x, y, cueTone === "type" ? 5 : cueTone === "read" ? 3.5 : 4, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(x, y, cueTone === "type" ? 1.1 : 1.25, 0, Math.PI * 2);
-      ctx.fill();
-      if (cueTone === "type") {
-        ctx.beginPath();
-        ctx.moveTo(x, y - 8);
-        ctx.lineTo(x, y + 8);
-        ctx.stroke();
-      } else if (cueTone === "read") {
-        ctx.beginPath();
-        ctx.moveTo(x - 5, y);
-        ctx.lineTo(x + 5, y);
-        ctx.stroke();
-      } else {
-        ctx.beginPath();
-        ctx.moveTo(x - 7, y);
-        ctx.lineTo(x - 3, y);
-        ctx.moveTo(x + 3, y);
-        ctx.lineTo(x + 7, y);
-        ctx.moveTo(x, y - 7);
-        ctx.lineTo(x, y - 3);
-        ctx.moveTo(x, y + 3);
-        ctx.lineTo(x, y + 7);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    for (const ripple of snapshot.ripples) {
-      ctx.beginPath();
-      ctx.arc(scaleX(ripple.x, canvasWidth), scaleY(ripple.y, canvasHeight), 18, 0, Math.PI * 2);
-      ctx.strokeStyle =
-        cueTone === "error"
-          ? "rgba(239, 68, 68, 0.8)"
-          : cueTone === "success"
-            ? "rgba(34, 197, 94, 0.74)"
-            : cueTone === "type"
-              ? "rgba(77, 171, 247, 0.8)"
-              : "rgba(255, 208, 92, 0.74)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-
-    if (snapshot.typing && snapshot.mainAgent) {
-      ctx.fillStyle = "rgba(0, 0, 0, 0.72)";
-      ctx.fillRect(scaleX(snapshot.mainAgent.x, canvasWidth) - 20, scaleY(snapshot.mainAgent.y, canvasHeight) - 52, 40, 18);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText("...", scaleX(snapshot.mainAgent.x, canvasWidth) - 8, scaleY(snapshot.mainAgent.y, canvasHeight) - 39);
-    }
-  }, [snapshot]);
-
-  const mainStyle = useMemo(() => {
-    if (!snapshot.mainAgent || !stageRef.current) {
-      return null;
-    }
-    const rect = stageRef.current.getBoundingClientRect();
-    return {
-      left: snapSpritePosition(scaleX(snapshot.mainAgent.x, rect.width) - MAIN_SPRITE_X_OFFSET),
-      top: snapSpritePosition(scaleY(snapshot.mainAgent.y, rect.height) - MAIN_SPRITE_Y_OFFSET),
-    };
-  }, [snapshot]);
-
-  const stageDimensions = useMemo(() => {
-    if (!stageRef.current) {
-      return null;
-    }
-    const rect = stageRef.current.getBoundingClientRect();
-    return { width: rect.width, height: rect.height };
-  }, [snapshot]);
+    spriteTelemetrySentRef.current = false;
+  }, [sessionId]);
 
   useEffect(() => {
-    if (motionClassForSnapshot(snapshot) !== "is-idle") {
+    if (!isTakeoverInterventionActive) {
+      setTakeoverCardCollapsed(false);
+    }
+  }, [isTakeoverInterventionActive, sessionId]);
+
+  const emitSpriteVisible = useMemo(
+    () => () => {
+      if (
+        spriteTelemetrySentRef.current ||
+        !onUiTelemetry ||
+        !showStageSprites ||
+        !stageSnapshot.mainAgent
+      ) {
+        return;
+      }
+      spriteTelemetrySentRef.current = true;
+      onUiTelemetry({
+        event: "sprite_visible",
+        meta: {
+          source_mode: stageSnapshot.mainAgent.id === "main_bootstrap" ? "bootstrap" : "event_driven",
+        },
+      });
+    },
+    [onUiTelemetry, showStageSprites, stageSnapshot.mainAgent],
+  );
+
+  useEffect(() => {
+    const image = mainSpriteRef.current;
+    if (!image || !stageSnapshot.mainAgent || !showStageSprites) {
+      return;
+    }
+    if (image.complete && image.naturalWidth > 0) {
+      emitSpriteVisible();
+    }
+  }, [emitSpriteVisible, showStageSprites, stageSnapshot.mainAgent]);
+
+
+  const mainStyle = useMemo(() => {
+    if (!stageSnapshot.mainAgent || !stageDimensions) {
+      return null;
+    }
+    return resolveMainSpriteStyle(stageSnapshot, stageDimensions);
+  }, [stageSnapshot, stageDimensions]);
+
+  useEffect(() => {
+    if (motionClassForSnapshot(stageSnapshot) !== "is-idle") {
       setHoverCelebration(false);
     }
-  }, [snapshot]);
+  }, [stageSnapshot]);
 
   const mainMotionClass = useMemo(() => {
-    if (hoverCelebration && motionClassForSnapshot(snapshot) === "is-idle") {
+    if (hoverCelebration && motionClassForSnapshot(stageSnapshot) === "is-idle") {
       return "is-hover-success";
     }
-    return motionClassForSnapshot(snapshot);
-  }, [hoverCelebration, snapshot]);
+    return motionClassForSnapshot(stageSnapshot);
+  }, [hoverCelebration, stageSnapshot]);
 
   const mainSpriteClasses = useMemo(() => {
-    const classes = ["sprite", "sprite-main", mainMotionClass, `movement-${snapshot.mainAgent?.movementState ?? "anchored"}`];
-    if (snapshot.mainAgent?.isMoving) {
+    const classes = ["sprite", "sprite-main", mainMotionClass, `movement-${stageSnapshot.mainAgent?.movementState ?? "anchored"}`];
+    if (stageSnapshot.mainAgent?.isMoving) {
       classes.push("is-moving");
     }
-    if (snapshot.mainAgent?.arrivalPulse) {
+    if (stageSnapshot.mainAgent?.arrivalPulse) {
       classes.push("is-arriving");
     }
     return classes.join(" ");
-  }, [mainMotionClass, snapshot.mainAgent?.arrivalPulse, snapshot.mainAgent?.isMoving]);
+  }, [mainMotionClass, stageSnapshot.mainAgent?.arrivalPulse, stageSnapshot.mainAgent?.isMoving, stageSnapshot.mainAgent?.movementState]);
 
   const showCaption =
     Boolean(snapshot.caption) &&
     snapshot.caption !== "Awaiting run" &&
+    !snapshot.typing &&
     !activeIntervention &&
     interactionMode !== "takeover";
 
@@ -430,11 +505,14 @@ export function LiveStage({
           : null;
 
   const interventionLineStyle = useMemo(() => {
-    if (!interventionState || !snapshot.mainAgent || !stageDimensions) {
+    if (interventionState !== "approval" && interventionState !== "bridge") {
       return null;
     }
-    const sourceX = scaleX(snapshot.mainAgent.x, stageDimensions.width);
-    const sourceY = scaleY(snapshot.mainAgent.y, stageDimensions.height);
+    if (!stageSnapshot.mainAgent || !stageDimensions) {
+      return null;
+    }
+    const sourceX = scaleX(stageSnapshot.mainAgent.x, stageDimensions.width);
+    const sourceY = scaleY(stageSnapshot.mainAgent.y, stageDimensions.height);
     const targetX = stageDimensions.width / 2;
     const targetY = stageDimensions.height - 138;
     const dx = targetX - sourceX;
@@ -445,52 +523,27 @@ export function LiveStage({
       width: `${length}px`,
       transform: `translate3d(${snapSpritePosition(sourceX)}px, ${snapSpritePosition(sourceY)}px, 0) rotate(${angle}deg)`,
     };
-  }, [interventionState, snapshot.mainAgent, stageDimensions]);
+  }, [interventionState, stageSnapshot.mainAgent, stageDimensions]);
 
   const interventionOriginStyle = useMemo(() => {
-    if (!interventionState || !snapshot.mainAgent || !stageDimensions) {
+    if (interventionState !== "approval" && interventionState !== "bridge") {
+      return null;
+    }
+    if (!stageSnapshot.mainAgent || !stageDimensions) {
       return null;
     }
     return {
-      left: `${snapSpritePosition(scaleX(snapshot.mainAgent.x, stageDimensions.width))}px`,
-      top: `${snapSpritePosition(scaleY(snapshot.mainAgent.y, stageDimensions.height))}px`,
+      left: `${snapSpritePosition(scaleX(stageSnapshot.mainAgent.x, stageDimensions.width))}px`,
+      top: `${snapSpritePosition(scaleY(stageSnapshot.mainAgent.y, stageDimensions.height))}px`,
     };
-  }, [interventionState, snapshot.mainAgent, stageDimensions]);
+  }, [interventionState, stageSnapshot.mainAgent, stageDimensions]);
 
   const captionAnchor = useMemo(() => {
     if (!showCaption || !stageDimensions) {
       return null;
     }
-
-    const anchorX = snapshot.targetPoint
-      ? scaleX(snapshot.targetPoint.x, stageDimensions.width)
-      : snapshot.mainAgent
-        ? scaleX(snapshot.mainAgent.x, stageDimensions.width)
-        : stageDimensions.width / 2;
-    const anchorY = snapshot.targetPoint
-      ? scaleY(snapshot.targetPoint.y, stageDimensions.height)
-      : snapshot.mainAgent
-        ? scaleY(snapshot.mainAgent.y, stageDimensions.height)
-        : stageDimensions.height / 2;
-
-    const placeRight = anchorX < stageDimensions.width * 0.62;
-    const bubbleWidth = Math.min(stageDimensions.width * 0.3, 288);
-    const horizontalOffset = placeRight ? 34 : -(bubbleWidth + 34);
-    const bubbleLeft = clampStagePosition(anchorX + horizontalOffset, 16, stageDimensions.width - bubbleWidth - 16);
-    const placeBelow = anchorY < 92;
-    const bubbleTop = clampStagePosition(anchorY + (placeBelow ? 18 : -50), 70, stageDimensions.height - 72);
-    return {
-      bubbleStyle: {
-        left: `${snapSpritePosition(bubbleLeft)}px`,
-        top: `${snapSpritePosition(bubbleTop)}px`,
-      },
-      bubbleClassName: `caption-anchor ${placeRight ? "is-right" : "is-left"} ${placeBelow ? "is-below" : "is-above"}`,
-      tailStyle: {
-        left: `${snapSpritePosition(anchorX)}px`,
-        top: `${snapSpritePosition(anchorY)}px`,
-      },
-    };
-  }, [showCaption, snapshot.targetPoint, snapshot.mainAgent, stageDimensions]);
+    return resolveCaptionLayout(stageSnapshot, stageDimensions, mainStyle);
+  }, [showCaption, stageSnapshot, stageDimensions, mainStyle]);
 
   const captionToneClass = useMemo(() => {
     switch (cueToneForAction(snapshot.mainActionType)) {
@@ -509,10 +562,6 @@ export function LiveStage({
     }
   }, [snapshot.mainActionType]);
 
-  const hasVisibleBrowserTarget =
-    Boolean(browserContext?.url) &&
-    browserContext?.url !== "about:blank" &&
-    browserContext?.domain !== "unknown";
   const placeholderHeadline = reviewMode
     ? "No keyframe captured for this step"
     : hasVisibleBrowserTarget
@@ -533,6 +582,23 @@ export function LiveStage({
 
 
   const canRemoteControl = (interactionMode === "takeover" || sessionStatus === "completed" || sessionStatus === "stopped" || sessionStatus === "failed") && !reviewMode;
+
+  const shouldBlur = activeIntervention?.kind === "approval" || activeIntervention?.kind === "live_browser_view";
+
+  const handleCollapseTakeoverCard = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    setTakeoverCardCollapsed(true);
+  };
+
+  const handleExpandTakeoverCard = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    setTakeoverCardCollapsed(false);
+  };
+
+  const handleEndTakeover = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    onCommand({ type: "end_takeover", payload: {} });
+  };
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!canRemoteControl || !stageRef.current || !stageDimensions) return;
@@ -588,7 +654,7 @@ export function LiveStage({
     tabIndex={0}
     style={{ outline: "none" }}
   >
-      <div className="stage-frame">
+      <div className={`stage-frame ${interactionMode === "takeover" ? "is-takeover" : ""}`}>
         <div className="stage-chrome stage-chrome-top">
           <div className="stage-browser-shell">
             <div className="stage-browser-dots" aria-hidden="true">
@@ -596,8 +662,8 @@ export function LiveStage({
               <span />
               <span />
             </div>
-            <div className="stage-browser-address">
-              {browserContext?.domain || liveViewLabel(observerMode, supportsFrames, adapterId)}
+            <div className={`stage-browser-address ${isNavigating ? "is-navigating" : ""}`}>
+              {isNavigating ? `Connecting to ${browserContext?.domain}...` : (browserContext?.domain || liveViewLabel(observerMode, supportsFrames, adapterId))}
             </div>
             {browserContext ? (
               <div className="stage-browser-context" aria-label="Current page context">
@@ -605,45 +671,51 @@ export function LiveStage({
                 {browserContext.title ? <span className="stage-browser-title">{browserContext.title}</span> : null}
               </div>
             ) : null}
+            {capabilities?.supports_takeover && !reviewMode ? (
+              <button
+                type="button"
+                className={`intervention-button ${interactionMode === "takeover" ? "intervention-button-primary" : "intervention-button-soft"}`}
+                style={{ marginLeft: "auto", padding: "2px 8px", fontSize: "12px", minHeight: "24px" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (interactionMode === "takeover") {
+                    onCommand({ type: "end_takeover", payload: {} });
+                  } else {
+                    onCommand({ type: "start_takeover", payload: {} });
+                  }
+                }}
+              >
+                {interactionMode === "takeover" ? "Return control" : "Take over"}
+              </button>
+            ) : null}
           </div>
         </div>
         {showVideo ? (
           <>
-            <video className="browser-feed browser-feed-video" ref={videoRef} autoPlay muted playsInline />
+            <video className={`browser-feed browser-feed-video ${shouldBlur ? "is-blurred" : ""}`} ref={videoRef} autoPlay muted playsInline />
             {videoStatus === "connecting" ? (
               <div className="stage-connecting">Connecting live video…</div>
             ) : null}
           </>
         ) : snapshot.frameSrc ? (
-          <img className="browser-feed" src={snapshot.frameSrc} alt="Browser feed" />
+          <img
+            className={`browser-feed ${shouldBlur ? "is-blurred" : ""} ${imageLoading && reviewMode ? "is-loading" : ""}`}
+            src={snapshot.frameSrc}
+            alt="Browser feed"
+            onLoad={() => {
+              setLoadedFrameSrc(snapshot.frameSrc);
+              setImageLoading(false);
+            }}
+          />
         ) : (
-          <div className={`browser-feed placeholder ${supportsFrames ? "" : "adapter-shell"}`}>
-            {supportsFrames && hasVisibleBrowserTarget ? (
+          <div className={`browser-feed placeholder ${supportsFrames ? "" : "adapter-shell"} ${snapshot.fallbackMode ? "is-fallback" : ""} ${shouldBlur ? "is-blurred" : ""}`}>
+            {supportsFrames && hasVisibleBrowserTarget && !snapshot.fallbackMode ? (
               <div className="stage-placeholder-shell">
-                <div className="stage-placeholder-window">
-                  <div className="stage-placeholder-toolbar">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                  <div className="stage-placeholder-canvas">
-                    <div className="stage-placeholder-copy">
-                      <span className="stage-placeholder-kicker">live browser</span>
-                      <h3>{placeholderHeadline}</h3>
-                      <p>{placeholderBody}</p>
-                      <small>{placeholderNote}</small>
-                    </div>
-                    <div className="stage-placeholder-skeleton" aria-hidden="true">
-                      <div className="stage-placeholder-line line-wide" />
-                      <div className="stage-placeholder-line line-mid" />
-                      <div className="stage-placeholder-line line-short" />
-                      <div className="stage-placeholder-grid">
-                        <span />
-                        <span />
-                        <span />
-                      </div>
-                    </div>
-                  </div>
+                <div className="stage-placeholder-loader"></div>
+                <div className="stage-placeholder-copy">
+                  <h3>{placeholderHeadline}</h3>
+                  <p>{placeholderBody}</p>
+                  <small>{placeholderNote}</small>
                 </div>
               </div>
             ) : (
@@ -663,23 +735,78 @@ export function LiveStage({
             )}
           </div>
         )}
-        <canvas ref={canvasRef} className="overlay-canvas" />
+
+        {/* Modern CSS Overlays */}
+        {showStageSprites && snapshot.targetRect && stageDimensions && (
+          <div
+            className={`target-rect-overlay tone-${cueToneForAction(snapshot.mainActionType)}`}
+            style={{
+              left: scaleX(snapshot.targetRect.x, stageDimensions.width),
+              top: scaleY(snapshot.targetRect.y, stageDimensions.height),
+              width: scaleX(snapshot.targetRect.width, stageDimensions.width),
+              height: scaleY(snapshot.targetRect.height, stageDimensions.height),
+            }}
+          >
+            {cueToneForAction(snapshot.mainActionType) === "read" ? (
+              <div className="corner-brackets">
+                <span className="tl"></span><span className="tr"></span>
+                <span className="bl"></span><span className="br"></span>
+              </div>
+            ) : cueToneForAction(snapshot.mainActionType) === "type" ? (
+              <div className="type-underline"></div>
+            ) : null}
+          </div>
+        )}
+
+        {showStageSprites && snapshot.targetPoint && stageDimensions && (
+          <div
+            className={`target-point-overlay tone-${cueToneForAction(snapshot.mainActionType)}`}
+            style={{
+              left: scaleX(snapshot.targetPoint.x, stageDimensions.width),
+              top: scaleY(snapshot.targetPoint.y, stageDimensions.height),
+            }}
+          />
+        )}
+
+        {showStageSprites && snapshot.ripples.map((ripple, i) => (
+          <div
+            key={`ripple-${i}-${ripple.x}-${ripple.y}`}
+            className={`click-ripple tone-${cueToneForAction(snapshot.mainActionType)}`}
+            style={{
+              left: scaleX(ripple.x, stageDimensions?.width ?? 1920),
+              top: scaleY(ripple.y, stageDimensions?.height ?? 1080),
+            }}
+          />
+        ))}
+
         {displayFps !== null ? (
           <div className="stage-fps">{`fps ${displayFps.toFixed(1)} (${fpsSource})`}</div>
         ) : null}
-        {renderSprites && snapshot.mainAgent && mainStyle ? (
+        {showStageSprites && stageSnapshot.mainAgent && mainStyle ? (
           <div
-            className="sprite-positioner sprite-positioner-main"
+            className={`sprite-positioner sprite-positioner-main ${stageSnapshot.fallbackMode ? "is-hero-fallback" : ""}`}
             style={{
               transform: `translate3d(${mainStyle.left}px, ${mainStyle.top}px, 0)`,
             }}
           >
+            {stageSnapshot.typing && (
+              <div className="typing-bubble" aria-hidden="true">
+                <span className="typing-label">typing</span>
+                <div className="typing-track">
+                  <div className="typing-dot"></div>
+                  <div className="typing-dot"></div>
+                  <div className="typing-dot"></div>
+                </div>
+              </div>
+            )}
             <img
+              ref={mainSpriteRef}
               className={mainSpriteClasses}
-              src={snapshot.mainAgent.framePath}
+              src={stageSnapshot.mainAgent.framePath}
               alt="Main sprite"
+              onLoad={emitSpriteVisible}
               onMouseEnter={() => {
-                if (motionClassForSnapshot(snapshot) === "is-idle") {
+                if (motionClassForSnapshot(stageSnapshot) === "is-idle") {
                   setHoverCelebration(true);
                 }
               }}
@@ -687,15 +814,15 @@ export function LiveStage({
             />
           </div>
         ) : null}
-        {renderSprites
-          ? snapshot.subagents
-              .filter((agent) => agent.id !== snapshot.mainAgent?.id)
+        {showStageSprites
+          ? stageSnapshot.subagents
+              .filter((agent) => agent.id !== stageSnapshot.mainAgent?.id)
               .map((agent) => (
               <div
                 key={agent.id}
                 className="sprite-positioner sprite-positioner-subagent"
                 style={{
-                  transform: `translate3d(${snapSpritePosition(scaleX(agent.x, stageDimensions?.width ?? 1280) - SUBAGENT_SPRITE_X_OFFSET)}px, ${snapSpritePosition(scaleY(agent.y, stageDimensions?.height ?? 800) - SUBAGENT_SPRITE_Y_OFFSET)}px, 0)`,
+                  transform: `translate3d(${snapSpritePosition(scaleX(agent.x, stageDimensions?.width ?? 1920) - SUBAGENT_SPRITE_X_OFFSET)}px, ${snapSpritePosition(scaleY(agent.y, stageDimensions?.height ?? 1080) - SUBAGENT_SPRITE_Y_OFFSET)}px, 0)`,
                 }}
               >
                 <img
@@ -718,7 +845,7 @@ export function LiveStage({
         {interventionLineStyle ? <div className="intervention-link" style={interventionLineStyle} aria-hidden="true" /> : null}
         {activeIntervention?.kind === "approval" ? (
           <div className="intervention-overlay">
-            <div className="intervention-card intervention-card-approval">
+            <div className="intervention-card intervention-card-approval" onMouseDown={(e) => e.stopPropagation()} onMouseUp={(e) => e.stopPropagation()}>
               <div className="intervention-kicker-row">
                 <span className="intervention-kicker">Lumon paused here</span>
                 <span className="intervention-state-pill">needs your approval</span>
@@ -738,15 +865,15 @@ export function LiveStage({
                 </div>
               ) : null}
               <div className="intervention-actions">
-                <button className="intervention-button intervention-button-ghost" onClick={() => onCommand({ type: "reject", payload: { checkpoint_id: activeIntervention.checkpointId ?? "" } })}>
+                <button className="intervention-button intervention-button-ghost" onClick={(e) => { e.stopPropagation(); onCommand({ type: "reject", payload: { checkpoint_id: activeIntervention.checkpointId ?? "" } }); }}>
                   Deny
                 </button>
                 {capabilities?.supports_takeover ? (
-                  <button className="intervention-button intervention-button-soft" onClick={() => onCommand({ type: "start_takeover", payload: {} })}>
+                  <button className="intervention-button intervention-button-soft" onClick={(e) => { e.stopPropagation(); onCommand({ type: "start_takeover", payload: {} }); }}>
                     Take over
                   </button>
                 ) : null}
-                <button className="intervention-button intervention-button-primary" onClick={() => onCommand({ type: "approve", payload: { checkpoint_id: activeIntervention.checkpointId ?? "" } })}>
+                <button className="intervention-button intervention-button-primary" onClick={(e) => { e.stopPropagation(); onCommand({ type: "approve", payload: { checkpoint_id: activeIntervention.checkpointId ?? "" } }); }}>
                   Approve
                 </button>
               </div>
@@ -755,7 +882,7 @@ export function LiveStage({
         ) : null}
         {activeIntervention?.kind === "live_browser_view" ? (
           <div className="intervention-overlay">
-            <div className="intervention-card intervention-card-bridge">
+            <div className="intervention-card intervention-card-bridge" onMouseDown={(e) => e.stopPropagation()} onMouseUp={(e) => e.stopPropagation()}>
               <div className="intervention-kicker-row">
                 <span className="intervention-kicker">Live browser view</span>
                 <span className="intervention-state-pill">ready to open</span>
@@ -775,39 +902,86 @@ export function LiveStage({
                 </div>
               ) : null}
               <div className="intervention-actions">
-                <button className="intervention-button intervention-button-ghost" onClick={() => onCommand({ type: "decline_bridge", payload: {} })}>
+                <button className="intervention-button intervention-button-ghost" onClick={(e) => { e.stopPropagation(); onCommand({ type: "decline_bridge", payload: {} }); }}>
                   Not now
                 </button>
-                <button className="intervention-button intervention-button-primary" onClick={() => onCommand({ type: "accept_bridge", payload: {} })}>
+                <button className="intervention-button intervention-button-primary" onClick={(e) => { e.stopPropagation(); onCommand({ type: "accept_bridge", payload: {} }); }}>
                   Open view
                 </button>
               </div>
             </div>
           </div>
         ) : null}
-        {(interactionMode === "takeover" || activeIntervention?.kind === "manual_control") && activeIntervention?.kind !== "approval" ? (
-          <div className="intervention-overlay">
-            <div className="intervention-card intervention-card-takeover">
-              <div className="intervention-kicker-row">
-                <span className="intervention-kicker">You are in control</span>
-                <span className="intervention-state-pill">manual control</span>
-              </div>
-              <div className="intervention-copy">
-                <strong>{activeIntervention?.headline || "You now control the page"}</strong>
-                <p>{activeIntervention?.reasonText || "The agent is paused here until you return control."}</p>
-              </div>
-              {activeIntervention?.sourceUrl || activeIntervention?.targetSummary ? (
-                <div className="intervention-context-line">
-                  {activeIntervention.sourceUrl ? <span>{activeIntervention.sourceUrl}</span> : null}
-                  {activeIntervention.targetSummary ? <strong>{activeIntervention.targetSummary}</strong> : null}
+        {isTakeoverInterventionActive ? (
+          <div className="intervention-overlay intervention-overlay-takeover">
+            {takeoverCardCollapsed ? (
+              <div
+                className="takeover-chip"
+                onMouseDown={(e) => e.stopPropagation()}
+                onMouseUp={(e) => e.stopPropagation()}
+              >
+                <div className="takeover-chip-copy">
+                  <span className="intervention-kicker">Manual control</span>
+                  <strong>Manual control active</strong>
                 </div>
-              ) : null}
-              <div className="intervention-actions">
-                <button className="intervention-button intervention-button-primary" onClick={() => onCommand({ type: "end_takeover", payload: {} })}>
-                  Return control
-                </button>
+                <div className="takeover-chip-actions">
+                  <button
+                    type="button"
+                    className="intervention-button intervention-button-ghost takeover-chip-button"
+                    aria-label="Expand manual control card"
+                    onClick={handleExpandTakeoverCard}
+                  >
+                    Expand
+                  </button>
+                  <button
+                    type="button"
+                    className="intervention-button intervention-button-primary takeover-chip-button"
+                    onClick={handleEndTakeover}
+                  >
+                    Return control
+                  </button>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="intervention-card intervention-card-takeover" onMouseDown={(e) => e.stopPropagation()} onMouseUp={(e) => e.stopPropagation()}>
+                <div className="intervention-kicker-row">
+                  <span className="intervention-kicker">You are in control</span>
+                  <div className="intervention-card-controls">
+                    <span className="intervention-state-pill">manual control</span>
+                    <button
+                      type="button"
+                      className="intervention-icon-button"
+                      aria-label="Collapse manual control card"
+                      onClick={handleCollapseTakeoverCard}
+                    >
+                      Minimize
+                    </button>
+                  </div>
+                </div>
+                <div className="intervention-copy">
+                  <strong>{activeIntervention?.headline || "You now control the page"}</strong>
+                  <p>{activeIntervention?.reasonText || "The agent is paused here until you return control."}</p>
+                </div>
+                {activeIntervention?.sourceUrl || activeIntervention?.targetSummary ? (
+                  <div className="intervention-context-line">
+                    {activeIntervention.sourceUrl ? <span>{activeIntervention.sourceUrl}</span> : null}
+                    {activeIntervention.targetSummary ? <strong>{activeIntervention.targetSummary}</strong> : null}
+                  </div>
+                ) : null}
+                <div className="intervention-actions">
+                  <button
+                    type="button"
+                    className="intervention-button intervention-button-ghost"
+                    onClick={handleCollapseTakeoverCard}
+                  >
+                    Collapse
+                  </button>
+                  <button type="button" className="intervention-button intervention-button-primary" onClick={handleEndTakeover}>
+                    Return control
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         ) : null}
       </div>
