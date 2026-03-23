@@ -2,6 +2,10 @@
 
 Lumon lets you see what your agent is doing online and step in when it matters.
 
+<p align="center">
+  <img src="docs/assets/readme/lobster_idle.gif" alt="Idle lobster" width="132" />
+</p>
+
 It is a local visual supervision layer that sits beside an existing agent and makes online work legible:
 - what the agent is doing
 - where it is acting
