@@ -32,6 +32,7 @@ Completed runs can then be reviewed afterward through the artifact-backed review
 
 ## Sprite State Guide
 The lobster overlay is not decorative filler. Each state maps to a real runtime condition or action class in the sprite manifest.
+The current lobster sprite set started as generated pixel-art source material from Nanobanana 2. From there, the production frames were cleaned, background-fixed, normalized to a shared canvas, assembled into runtime sheets, and mapped to explicit Lumon states so the overlay reflects what the agent is actually doing instead of acting like a decorative mascot.
 
 | State | Preview | Triggered by |
 | --- | --- | --- |
