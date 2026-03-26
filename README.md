@@ -14,6 +14,10 @@
   </a>
 </p>
 
+<p align="center">
+  <a href="https://lumon-live.netlify.app"><strong>Live demo</strong></a>
+</p>
+
 Lumon lets you see what your agent is doing online and step in when it matters.
 
 It is a local visual supervision layer that sits beside an existing agent and makes online work legible:
