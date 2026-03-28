@@ -15,7 +15,9 @@
 </p>
 
 <p align="center">
-  <a href="https://lumon-live.netlify.app"><strong>Website</strong></a>
+  <a href="https://lumon-live.pages.dev"><strong>Live demo (Cloudflare)</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://lumon-live.netlify.app"><strong>Netlify mirror</strong></a>
 </p>
 
 Lumon lets you see what your agent is doing online and step in when it matters.
