@@ -47,6 +47,7 @@ export interface AdapterCapabilities {
   supports_approval: boolean;
   supports_takeover: boolean;
   supports_frames: boolean;
+  supports_direct_takeover?: boolean;
 }
 
 export interface SessionBootstrapPayload {
@@ -71,6 +72,8 @@ export interface SessionStatePayload {
   observer_mode?: boolean;
   web_mode?: WebModeId | null;
   web_bridge?: WebBridgeId | null;
+  takeover_mode?: "remote" | "direct" | null;
+  takeover_url?: string | null;
   state: SessionState;
   interaction_mode: InteractionMode;
   active_checkpoint_id: string | null;
@@ -265,7 +268,7 @@ export type ClientPayloadMap = {
   resume: Record<string, never>;
   approve: { checkpoint_id: string };
   reject: { checkpoint_id: string };
-  start_takeover: Record<string, never>;
+  start_takeover: { mode_preference?: "remote" | "direct" | null };
   end_takeover: Record<string, never>;
   stop: Record<string, never>;
 

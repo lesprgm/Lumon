@@ -45,3 +45,8 @@ If you need to understand Lumon quickly, read in this order:
 5. `TROUBLESHOOTING.md`
 
 If you are changing code in one subsystem, jump straight to the matching subsystem doc and then use `COMPONENT_INVENTORY.md` for the exact files.
+
+## Repo Hygiene Notes
+- Dog sprite source/output directories are optional art workspace assets and are ignored for normal clones.
+- Protocol fixture JSON files under `backend/app/fixtures/{messages,timelines}` are generated outputs; if missing locally, regenerate with `python backend/app/fixtures/build_fixtures.py`.
+- Transparent lobster sheet variants are ignored because runtime manifests reference normalized sheets in `frontend/public/assets/lobster/**/**_sheet_normalized.png`.

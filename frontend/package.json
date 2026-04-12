@@ -4,8 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "prebuild": "node ./scripts/write-runtime-manifest.mjs",
+    "prebuild:landing": "node ./scripts/write-runtime-manifest.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:landing": "tsc -b && VITE_LANDING_ROOT=1 vite build --outDir dist-landing",
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

@@ -83,3 +83,29 @@ backend/.mypy_cache/
 /package.json
 /package-lock.json
 /.opencode/bun.lock
+
+# Local editor/IDE state
+/.idea/
+/.vscode/
+*.swp
+*.swo
+
+# Local cache and coverage artifacts
+/.cache/
+/.ruff_cache/
+/backend/.ruff_cache/
+/backend/.coverage
+/backend/.coverage.*
+/frontend/coverage/
+/frontend/.vitest/
+
+# Non-runtime art workspace (large source assets)
+/dog sprite/
+/frontend/public/assets/dog/
+
+# Optional generated protocol fixture outputs (rebuild via backend/app/fixtures/build_fixtures.py)
+/backend/app/fixtures/messages/*.json
+/backend/app/fixtures/timelines/*.json
+
+# Large source sheet variants not used by runtime (normalized sheets are used)
+/frontend/public/assets/lobster/**/**_sheet_transparent.png
