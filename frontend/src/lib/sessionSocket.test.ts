@@ -68,4 +68,19 @@ describe("SessionSocket", () => {
 
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
+
+  it("marks the socket errored when a frame cannot be parsed", () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const onMessage = vi.fn();
+    const onStatus = vi.fn();
+    const socket = new SessionSocket("ws://127.0.0.1/ws", onMessage, onStatus);
+
+    socket.connect();
+    FakeWebSocket.instances[0].onmessage?.({
+      data: "{not-json",
+    } as MessageEvent<string>);
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(onStatus).toHaveBeenCalledWith("error");
+  });
 });

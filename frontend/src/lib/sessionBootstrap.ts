@@ -1,7 +1,15 @@
 import type { SessionBootstrapPayload } from "../protocol/types";
 
+const DEFAULT_BOOTSTRAP_ATTEMPTS = 4;
+const DEFAULT_BOOTSTRAP_RETRY_DELAY_MS = 1200;
+const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 2500;
+
 function normalizeBackendOrigin(rawOrigin: string): string {
   return rawOrigin.replace(/\/+$/, "");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 export function getBackendOrigin(
@@ -18,15 +26,36 @@ export async function bootstrapSession(
   fetchImpl: typeof fetch = fetch,
   backendOrigin: string = getBackendOrigin(),
 ): Promise<SessionBootstrapPayload> {
-  const response = await fetchImpl(`${backendOrigin}/api/bootstrap`, {
-    headers: {
-      Accept: "application/json",
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`Bootstrap failed with status ${response.status}`);
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < DEFAULT_BOOTSTRAP_ATTEMPTS; attempt += 1) {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timeoutHandle = controller
+      ? globalThis.setTimeout(() => controller.abort(), DEFAULT_BOOTSTRAP_TIMEOUT_MS)
+      : null;
+    try {
+      const response = await fetchImpl(`${backendOrigin}/api/bootstrap`, {
+        headers: {
+          Accept: "application/json",
+        },
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      if (response.ok) {
+        return (await response.json()) as SessionBootstrapPayload;
+      }
+      lastError = new Error(`Bootstrap failed with status ${response.status}`);
+    } catch (error) {
+      lastError =
+        error instanceof Error ? error : new Error("Bootstrap request failed");
+    } finally {
+      if (timeoutHandle) {
+        globalThis.clearTimeout(timeoutHandle);
+      }
+    }
+    if (attempt < DEFAULT_BOOTSTRAP_ATTEMPTS - 1) {
+      await sleep(DEFAULT_BOOTSTRAP_RETRY_DELAY_MS);
+    }
   }
-  return (await response.json()) as SessionBootstrapPayload;
+  throw lastError ?? new Error("Bootstrap request failed");
 }
 
 export function sessionBootstrapFromUrl(

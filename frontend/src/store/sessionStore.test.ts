@@ -8,6 +8,7 @@ const PLAYWRIGHT_CAPABILITIES = {
   supports_approval: true,
   supports_takeover: true,
   supports_frames: true,
+  supports_direct_takeover: false,
 };
 
 const OPENCODE_CAPABILITIES = {
@@ -15,6 +16,7 @@ const OPENCODE_CAPABILITIES = {
   supports_approval: false,
   supports_takeover: false,
   supports_frames: false,
+  supports_direct_takeover: false,
 };
 
 const runningState: AnyServerEnvelope = {
@@ -27,6 +29,8 @@ const runningState: AnyServerEnvelope = {
     observer_mode: true,
     web_mode: "observe_only",
     web_bridge: null,
+    takeover_mode: null,
+    takeover_url: null,
     state: "running",
     interaction_mode: "watch",
     active_checkpoint_id: null,

@@ -8,6 +8,7 @@ const PLAYWRIGHT_CAPABILITIES = {
   supports_approval: true,
   supports_takeover: true,
   supports_frames: true,
+  supports_direct_takeover: false,
 };
 
 describe("startFixtureReplay", () => {
@@ -22,6 +23,8 @@ describe("startFixtureReplay", () => {
             session_id: "sess_1",
             adapter_id: "playwright_native",
             adapter_run_id: "run_1",
+            takeover_mode: "remote",
+            takeover_url: null,
             state: "running",
             interaction_mode: "watch",
             active_checkpoint_id: null,

@@ -9,6 +9,7 @@ const PLAYWRIGHT_CAPABILITIES = {
   supports_approval: true,
   supports_takeover: true,
   supports_frames: true,
+  supports_direct_takeover: false,
 };
 
 function makeSessionState(state: SessionStatePayload["state"]): SessionStatePayload {
@@ -16,6 +17,8 @@ function makeSessionState(state: SessionStatePayload["state"]): SessionStatePayl
     session_id: "sess_demo_001",
     adapter_id: "playwright_native",
     adapter_run_id: "run_demo_001",
+    takeover_mode: "remote",
+    takeover_url: null,
     state,
     interaction_mode: state === "waiting_for_approval" ? "approval" : state === "takeover" ? "takeover" : "watch",
     active_checkpoint_id: null,
@@ -205,6 +208,106 @@ describe("OverlayEngine", () => {
     engine.applySessionState(makeSessionState("completed"));
     engine.tick(now);
     expect(latestCaption).toBe("Done.");
+  });
+
+  it("holds terminal caption when a stale running session state arrives after task result", () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const engine = new OverlayEngine();
+    let latestCaption = "";
+    let latestSessionState = "";
+
+    engine.subscribe((snapshot) => {
+      latestCaption = snapshot.caption;
+      latestSessionState = snapshot.sessionState;
+    });
+
+    engine.setStageReady(true);
+    engine.applySessionState(makeSessionState("running"));
+    now = 3000;
+    engine.tick(now);
+    expect(latestCaption).toBe("Planning next step...");
+
+    engine.applyTaskResult({
+      session_id: "sess_demo_001",
+      status: "completed",
+      summary_text: "The run finished after checking the docs.",
+      task_text: "Find a hotel",
+      adapter_id: "playwright_native",
+      adapter_run_id: "run_demo_001",
+    });
+    expect(latestSessionState).toBe("completed");
+    expect(latestCaption).toBe("The run finished after checking the docs.");
+
+    engine.applySessionState(makeSessionState("running"));
+    now = 6000;
+    engine.tick(now);
+    expect(latestSessionState).toBe("completed");
+    expect(latestCaption).toBe("The run finished after checking the docs.");
+  });
+
+  it("synthesizes a typing target rect from cursor when target_rect is missing", () => {
+    const engine = new OverlayEngine();
+    let latestTargetRect: { x: number; y: number; width: number; height: number } | null = null;
+
+    engine.subscribe((snapshot) => {
+      latestTargetRect = snapshot.targetRect;
+    });
+
+    engine.setStageReady(true);
+    engine.applySessionState(makeSessionState("running"));
+    engine.enqueueEvent({
+      ...makeEvent(2),
+      action_type: "type",
+      state: "typing",
+      cursor: { x: 1000, y: 520 },
+      target_rect: null,
+    });
+
+    expect(latestTargetRect).toEqual({ x: 920, y: 498, width: 160, height: 44 });
+  });
+
+  it("reuses recent typing target rect briefly when cursor is missing", () => {
+    let now = 1000;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+
+    const engine = new OverlayEngine();
+    let latestTargetRect: { x: number; y: number; width: number; height: number } | null = null;
+
+    engine.subscribe((snapshot) => {
+      latestTargetRect = snapshot.targetRect;
+    });
+
+    engine.setStageReady(true);
+    engine.applySessionState(makeSessionState("running"));
+    engine.enqueueEvent({
+      ...makeEvent(40),
+      action_type: "type",
+      state: "typing",
+      cursor: { x: 900, y: 420 },
+      target_rect: null,
+    });
+    expect(latestTargetRect).toEqual({ x: 820, y: 398, width: 160, height: 44 });
+
+    now += 600;
+    engine.enqueueEvent({
+      ...makeEvent(41),
+      action_type: "type",
+      state: "typing",
+      cursor: null,
+      target_rect: null,
+    });
+    expect(latestTargetRect).toEqual({ x: 820, y: 398, width: 160, height: 44 });
+
+    now += 2200;
+    engine.enqueueEvent({
+      ...makeEvent(42),
+      action_type: "type",
+      state: "typing",
+      cursor: null,
+      target_rect: null,
+    });
+    expect(latestTargetRect).toBeNull();
   });
 
   it("keeps only the newest buffered frame and event windows before stage readiness", () => {

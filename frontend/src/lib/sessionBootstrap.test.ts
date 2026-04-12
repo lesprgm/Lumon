@@ -44,10 +44,46 @@ describe("sessionBootstrap", () => {
 
     const payload = await bootstrapSession(fetchMock as unknown as typeof fetch, "http://127.0.0.1:8000");
 
-    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/api/bootstrap", {
-      headers: { Accept: "application/json" },
-    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/bootstrap",
+      expect.objectContaining({
+        headers: { Accept: "application/json" },
+      }),
+    );
     expect(payload.session_id).toBe("sess_123");
+  });
+
+  it("retries bootstrap failures before succeeding", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("backend booting"))
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          session_id: "sess_retry_123",
+          ws_token: "ws_retry_secret",
+          ws_path: "/ws/session",
+          protocol_version: "1.3.1",
+        }),
+      });
+
+    const bootstrapPromise = bootstrapSession(
+      fetchMock as unknown as typeof fetch,
+      "http://127.0.0.1:8000",
+    );
+
+    await vi.advanceTimersByTimeAsync(2400);
+    const payload = await bootstrapPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(payload.session_id).toBe("sess_retry_123");
+    vi.useRealTimers();
   });
 
   it("reads an existing bootstrap payload from the url", () => {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { getSpriteSet, SPRITE_FAMILY_OPTIONS, type SpriteFamily } from "../overlay/sprites";
+import { getSpriteSet } from "../overlay/sprites";
 import type { SessionStoreState } from "../store/sessionStore";
 
 const DWELL_MIN_MS = 6000;
@@ -234,8 +234,7 @@ export function StatusBar({
   showActivityToggle = true,
   reviewActionLabel,
   onReviewAction,
-  spriteFamily,
-  onSpriteFamilyChange,
+  onReturnControl,
 }: {
   state: SessionStoreState;
   leftRailCollapsed: boolean;
@@ -243,9 +242,9 @@ export function StatusBar({
   showActivityToggle?: boolean;
   reviewActionLabel?: string | null;
   onReviewAction?: (() => void) | null;
-  spriteFamily: SpriteFamily;
-  onSpriteFamilyChange: (family: SpriteFamily) => void;
+  onReturnControl?: (() => void) | null;
 }) {
+  const spriteFamily = "lobster" as const;
   const sessionState = state.session?.state ?? "idle";
   const interactionMode = state.session?.interaction_mode ?? "watch";
   const statusLabel =
@@ -265,7 +264,10 @@ export function StatusBar({
     interactionMode === "takeover" ||
     sessionState === "takeover" ||
     state.activeIntervention?.kind === "manual_control";
-  const showTopBarSprite = (sessionState === "idle" || sessionState === "paused" || isTakeoverTopBarSprite) && state.connectionState !== "error";
+  const showTopBarSprite =
+    (sessionState === "idle" || sessionState === "paused" || isTakeoverTopBarSprite) &&
+    state.connectionState !== "error";
+  const takeoverOnlyTopBar = isTakeoverTopBarSprite;
   // The top-bar mascot stays center-heavy and only shifts perches occasionally,
   // so the motion reads as attention rather than background decoration.
   const [idleFrameIndex, setIdleFrameIndex] = useState(0);
@@ -286,61 +288,41 @@ export function StatusBar({
   // Hover copy stays short on purpose so it reads like a tiny ambient thought,
   // not a second UI panel competing with the stage.
   const hoverThoughts = useMemo(
-    () =>
-      spriteFamily === "dog"
-        ? [
-            "👋",
-            "still watching.",
-            "good dog. good oversight.",
-            "no weird clicks.",
-            "that button looked suspicious.",
-            "i saw that.",
-            "maybe not that tab.",
-            "subtle. very subtle.",
-            "carry on.",
-            "this better not be prod.",
-            "great. another modal.",
-            "bold move.",
-            "i'm logging this mentally.",
-            "that felt unnecessary.",
-            "manual review energy.",
-            "please let this be the right button.",
-          ]
-        : [
-            "👋",
-            "still watching.",
-            "no weird clicks.",
-            "tiny lobster, big oversight.",
-            "all clear.",
-            "that button looked suspicious.",
-            "i saw that.",
-            "maybe not that tab.",
-            "subtle. very subtle.",
-            "absolutely intentional, i hope.",
-            "carry on.",
-            "this better not be prod.",
-            "great. another modal.",
-            "this workflow has layers.",
-            "bold move.",
-            "i'm logging this mentally.",
-            "that felt unnecessary.",
-            "we're really doing this.",
-            "interesting definition of safe.",
-            "not my first sketchy redirect.",
-            "clean click. questionable intent.",
-            "i respect the confidence.",
-            "one more popup and i'm filing a complaint.",
-            "this could have been a shortcut.",
-            "please let this be the right button.",
-            "i've seen worse. barely.",
-            "the audit trail writes itself.",
-            "ah yes, the scenic route.",
-            "we're flirting with a bad idea.",
-            "impeccable chaos.",
-            "if this opens a login wall, i'm judging.",
-            "manual review energy.",
-          ],
-    [spriteFamily],
+    () => [
+      "👋",
+      "still watching.",
+      "no weird clicks.",
+      "tiny lobster, big oversight.",
+      "all clear.",
+      "that button looked suspicious.",
+      "i saw that.",
+      "maybe not that tab.",
+      "subtle. very subtle.",
+      "absolutely intentional, i hope.",
+      "carry on.",
+      "this better not be prod.",
+      "great. another modal.",
+      "this workflow has layers.",
+      "bold move.",
+      "i'm logging this mentally.",
+      "that felt unnecessary.",
+      "we're really doing this.",
+      "interesting definition of safe.",
+      "not my first sketchy redirect.",
+      "clean click. questionable intent.",
+      "i respect the confidence.",
+      "one more popup and i'm filing a complaint.",
+      "this could have been a shortcut.",
+      "please let this be the right button.",
+      "i've seen worse. barely.",
+      "the audit trail writes itself.",
+      "ah yes, the scenic route.",
+      "we're flirting with a bad idea.",
+      "impeccable chaos.",
+      "if this opens a login wall, i'm judging.",
+      "manual review energy.",
+    ],
+    [],
   );
   const takeoverThoughts = useMemo(
     () =>
@@ -367,7 +349,7 @@ export function StatusBar({
           "very brave of the badge to say that out loud.",
         ],
       }) satisfies Record<TakeoverRegion, string[]>,
-    [spriteFamily],
+    [],
   );
 
   const activeRegion = movementPhase === "moving" && pendingMove ? pendingMove.region : currentRegion;
@@ -539,6 +521,18 @@ export function StatusBar({
 
     clearTakeoverThoughtTimeout();
     hasShownInitialTakeoverThoughtRef.current = false;
+    setHoverThought((current) => {
+      if (current && takeoverThoughts.logo.includes(current)) {
+        return null;
+      }
+      if (current && takeoverThoughts.center.includes(current)) {
+        return null;
+      }
+      if (current && takeoverThoughts.status.includes(current)) {
+        return null;
+      }
+      return current;
+    });
   }, [isTakeoverTopBarSprite, showTopBarSprite]);
 
   useEffect(() => () => {
@@ -615,7 +609,7 @@ export function StatusBar({
 
   return (
     <header className="status-bar">
-      {showTopBarSprite ? (
+      {showTopBarSprite && takeoverOnlyTopBar ? (
         <div className="status-idle-layer" aria-hidden="true">
           {hoverThought ? (
             <div className="status-thought-bubble" style={thoughtStyle}>
@@ -651,24 +645,12 @@ export function StatusBar({
             {reviewActionLabel}
           </button>
         ) : null}
+        {isTakeoverTopBarSprite && onReturnControl ? (
+          <button type="button" className="status-inline-action status-inline-action-primary" onClick={onReturnControl}>
+            Return control
+          </button>
+        ) : null}
         <div className="rail-toggle-group" aria-label="Observation drawers">
-          <div className="sprite-family-picker-container">
-            <span className="sprite-picker-label">Mascot:</span>
-            <div className="sprite-family-picker" role="group" aria-label="Mascot">
-              {SPRITE_FAMILY_OPTIONS.map((option) => (
-                <button
-                  key={option.family}
-                  type="button"
-                  className={`sprite-family-button${spriteFamily === option.family ? " is-active" : ""}`}
-                  onClick={() => onSpriteFamilyChange(option.family)}
-                  aria-pressed={spriteFamily === option.family}
-                  title={`Use ${option.label.toLowerCase()} mascot`}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
           {showActivityToggle ? (
             <button
               type="button"

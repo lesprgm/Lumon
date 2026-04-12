@@ -31,8 +31,12 @@ export class SessionSocket {
     };
     this.socket.onerror = () => this.onStatus("error");
     this.socket.onmessage = (event) => {
-      const message = JSON.parse(event.data) as AnyServerEnvelope;
-      this.onMessage(message);
+      try {
+        const message = JSON.parse(event.data) as AnyServerEnvelope;
+        this.onMessage(message);
+      } catch {
+        this.onStatus("error");
+      }
     };
   }
 

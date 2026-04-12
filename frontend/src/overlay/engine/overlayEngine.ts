@@ -1,5 +1,11 @@
 import { getSpriteSet, SpritePlayer, type SpriteSet } from "../sprites";
-import type { AgentEventPayload, FramePayload, SessionState, SessionStatePayload } from "../../protocol/types";
+import type {
+  AgentEventPayload,
+  FramePayload,
+  SessionState,
+  SessionStatePayload,
+  TaskResultPayload,
+} from "../../protocol/types";
 import type { LumonActionType } from "../sprites";
 
 export interface SceneAgent {
@@ -61,6 +67,11 @@ const TRANSIENT_ACTION_HOLD_MS: Partial<Record<AgentEventPayload["action_type"],
   complete: 820,
   error: 820,
 };
+const TYPE_FALLBACK_TARGET_WIDTH = 160;
+const TYPE_FALLBACK_TARGET_HEIGHT = 44;
+const TYPE_TARGET_RECT_TTL_MS = 1800;
+const BASE_STAGE_WIDTH = 1920;
+const BASE_STAGE_HEIGHT = 1080;
 
 function terminalCaptionForState(state: SessionState): string {
   switch (state) {
@@ -174,6 +185,8 @@ export class OverlayEngine {
   private ripples: SceneRipple[] = [];
   private targetPoint: { x: number; y: number } | null = null;
   private targetRect: { x: number; y: number; width: number; height: number } | null = null;
+  private lastTypingTargetRect: { x: number; y: number; width: number; height: number } | null = null;
+  private lastTypingTargetRectAt = 0;
   private targetVisualVisibleUntilMs = 0;
   private typing = false;
   private pendingEvents: AgentEventPayload[] = [];
@@ -182,6 +195,8 @@ export class OverlayEngine {
   private lastEmitMs = 0;
   private lastEventMs = 0;
   private fallbackMode = false;
+  private adapterRunId: string | null = null;
+  private terminalStatusOverride: "completed" | "failed" | "stopped" | null = null;
 
   constructor(spriteSet: SpriteSet = getSpriteSet("lobster")) {
     this.player = new SpritePlayer(spriteSet.manifest, spriteSet.assetBasePath);
@@ -198,7 +213,7 @@ export class OverlayEngine {
     const nowMs = performance.now();
     this.player = new SpritePlayer(spriteSet.manifest, spriteSet.assetBasePath);
     const nextFrame = this.player.update(nowMs, {
-      sessionState: this.sessionState,
+      sessionState: this._effectiveSessionState(),
       actionType: this.mainActionType ? toSpriteActionType(this.mainActionType) : undefined,
       isMoving: this.mainAgent ? this._isTrackedAgentMoving(this.mainAgent) : false,
     });
@@ -221,6 +236,8 @@ export class OverlayEngine {
 
   reset(): void {
     this.sessionState = "idle";
+    this.adapterRunId = null;
+    this.terminalStatusOverride = null;
     this.stageReady = false;
     this.frameSrc = null;
     this.caption = "Awaiting run";
@@ -232,6 +249,8 @@ export class OverlayEngine {
     this.ripples = [];
     this.targetPoint = null;
     this.targetRect = null;
+    this.lastTypingTargetRect = null;
+    this.lastTypingTargetRectAt = 0;
     this.targetVisualVisibleUntilMs = 0;
     this.typing = false;
     this.pendingEvents = [];
@@ -257,8 +276,30 @@ export class OverlayEngine {
   }
 
   applySessionState(payload: SessionStatePayload): void {
-    this.sessionState = payload.state;
     const nowMs = performance.now();
+    const runChanged =
+      this.adapterRunId !== null && this.adapterRunId !== payload.adapter_run_id;
+    this.adapterRunId = payload.adapter_run_id;
+    if (runChanged) {
+      this.terminalStatusOverride = null;
+    }
+    const isTerminalState =
+      payload.state === "completed" ||
+      payload.state === "failed" ||
+      payload.state === "stopped";
+    if (this.terminalStatusOverride !== null && !isTerminalState && !runChanged) {
+      this.emit(nowMs, true);
+      return;
+    }
+    this.sessionState = payload.state;
+    if (isTerminalState) {
+      this.terminalStatusOverride =
+        payload.state === "failed"
+          ? "failed"
+          : payload.state === "stopped"
+            ? "stopped"
+            : "completed";
+    }
 
     if (payload.state === "takeover" && !this.mainAgent) {
       const takeoverFrame = this.player.update(nowMs, {
@@ -287,11 +328,40 @@ export class OverlayEngine {
 
     if (payload.state === "completed" || payload.state === "failed" || payload.state === "stopped") {
       this.caption = terminalCaptionForState(payload.state);
-      this.captionVisibleUntilMs = nowMs + 2400;
+      this.captionVisibleUntilMs = Number.POSITIVE_INFINITY;
     }
 
-    this.player.syncToRuntime({ sessionState: payload.state }, performance.now());
-    this.emit(performance.now(), true);
+    const effectiveSessionState = this._effectiveSessionState();
+    this.player.syncToRuntime({ sessionState: effectiveSessionState }, nowMs);
+    this.emit(nowMs, true);
+  }
+
+  applyTaskResult(payload: TaskResultPayload): void {
+    const nowMs = performance.now();
+    const terminalState: "completed" | "failed" | "stopped" =
+      payload.status === "failed"
+        ? "failed"
+        : payload.status === "stopped"
+          ? "stopped"
+          : "completed";
+    this.terminalStatusOverride = terminalState;
+    this.sessionState = terminalState;
+    this.mainActionType = terminalState === "failed" ? "error" : "complete";
+    this.mainActionVisibleUntilMs =
+      nowMs + (TRANSIENT_ACTION_HOLD_MS[this.mainActionType] ?? 820);
+    this.typing = false;
+    const explicitSummary = payload.summary_text?.trim();
+    this.caption = explicitSummary || terminalCaptionForState(terminalState);
+    this.captionVisibleUntilMs = Number.POSITIVE_INFINITY;
+    this.player.syncToRuntime(
+      {
+        sessionState: terminalState,
+        actionType: toSpriteActionType(this.mainActionType),
+        isMoving: false,
+      },
+      nowMs,
+    );
+    this.emit(nowMs, true);
   }
 
   enqueueFrame(payload: FramePayload): void {
@@ -319,6 +389,7 @@ export class OverlayEngine {
   tick(nowMs: number): void {
     const dtSeconds = this.lastTickMs === null ? 1 / 60 : Math.min((nowMs - this.lastTickMs) / 1000, 0.05);
     this.lastTickMs = nowMs;
+    const effectiveSessionState = this._effectiveSessionState();
 
     // Override logic when fallbackMode is active
     let effectiveActionType = this.mainActionType ? toSpriteActionType(this.mainActionType) : undefined;
@@ -353,7 +424,7 @@ export class OverlayEngine {
         // Force glide state so it doesn't snap if it was far away
         this.mainAgent.movementState = "local_glide";
       }
-    } else if (this.sessionState === "running" && nowMs - this.lastEventMs > 2500 && !this.mainActionType) {
+    } else if (effectiveSessionState === "running" && nowMs - this.lastEventMs > 2500 && !this.mainActionType) {
       effectiveActionType = "wait";
       if (!effectiveCaption || effectiveCaption === "Awaiting run") {
         effectiveCaption = "Planning next step...";
@@ -361,11 +432,12 @@ export class OverlayEngine {
     }
 
     const nextFrame = this.player.update(nowMs, {
-      sessionState: this.sessionState,
+      sessionState: effectiveSessionState,
       actionType: effectiveActionType,
       isMoving: this.mainAgent ? this._isTrackedAgentMoving(this.mainAgent) : false,
     });
-    const { stiffness: mainSpringStiffness, damping: mainSpringDamping } = resolveMainSpringConfig(this.sessionState);
+    const { stiffness: mainSpringStiffness, damping: mainSpringDamping } =
+      resolveMainSpringConfig(effectiveSessionState);
     if (this.mainAgent) {
       this.mainAgent = {
         ...this._advanceAgentPosition(
@@ -403,7 +475,13 @@ export class OverlayEngine {
       this.mainActionType = null;
       this.typing = false;
     }
-    if (this.caption && nowMs > this.captionVisibleUntilMs) {
+    if (
+      this.caption &&
+      nowMs > this.captionVisibleUntilMs &&
+      effectiveSessionState !== "completed" &&
+      effectiveSessionState !== "failed" &&
+      effectiveSessionState !== "stopped"
+    ) {
       this.caption = "";
     }
     this.emit(nowMs, true);
@@ -453,7 +531,7 @@ export class OverlayEngine {
     this.captionVisibleUntilMs = nowMs + (payload.action_type === "click" ? 850 : 1200);
     const hotspot = this._resolveHotspot(payload);
     this.targetPoint = hotspot;
-    this.targetRect = payload.target_rect;
+    this.targetRect = this._resolvedTargetRect(payload, nowMs);
     this.targetVisualVisibleUntilMs = hotspot || payload.target_rect ? nowMs + 950 : 0;
     if (payload.agent_kind === "main") {
       const shouldReplaceVisualAction =
@@ -509,14 +587,15 @@ export class OverlayEngine {
   }
 
   private snapshot(effectiveCaption?: string): SceneSnapshot {
+    const effectiveSessionState = this._effectiveSessionState();
     let captionToUse = effectiveCaption ?? this.caption;
-    if (!this.fallbackMode && this.sessionState === "running" && (performance.now() - this.lastEventMs > 2500) && !this.mainActionType && (!captionToUse || captionToUse === "Awaiting run")) {
+    if (!this.fallbackMode && effectiveSessionState === "running" && (performance.now() - this.lastEventMs > 2500) && !this.mainActionType && (!captionToUse || captionToUse === "Awaiting run")) {
       captionToUse = "Planning next step...";
     }
     return {
       frameSrc: this.frameSrc,
       stageReady: this.stageReady,
-      sessionState: this.sessionState,
+      sessionState: effectiveSessionState,
       mainActionType: this.mainActionType,
       caption: captionToUse,
       mainAgent: this.mainAgent ? this._toSceneAgent(this.mainAgent, performance.now()) : null,
@@ -527,6 +606,58 @@ export class OverlayEngine {
       typing: this.typing,
       fallbackMode: this.fallbackMode,
     };
+  }
+
+  private _effectiveSessionState(): SessionState {
+    return this.terminalStatusOverride ?? this.sessionState;
+  }
+
+  private _resolvedTargetRect(
+    payload: AgentEventPayload,
+    nowMs: number,
+  ): { x: number; y: number; width: number; height: number } | null {
+    if (payload.target_rect) {
+      if (payload.action_type === "type") {
+        this.lastTypingTargetRect = payload.target_rect;
+        this.lastTypingTargetRectAt = nowMs;
+      }
+      return payload.target_rect;
+    }
+    // Some runtime paths do not provide a concrete input rect for typing.
+    // In that case synthesize a small anchor box around the cursor so the
+    // mascot can still perch near the active input instead of drifting.
+    if (payload.action_type !== "type") {
+      return null;
+    }
+    if (!payload.cursor) {
+      if (
+        this.lastTypingTargetRect &&
+        nowMs - this.lastTypingTargetRectAt <= TYPE_TARGET_RECT_TTL_MS
+      ) {
+        return this.lastTypingTargetRect;
+      }
+      return null;
+    }
+    const width = TYPE_FALLBACK_TARGET_WIDTH;
+    const height = TYPE_FALLBACK_TARGET_HEIGHT;
+    const x = Math.max(
+      0,
+      Math.min(
+        BASE_STAGE_WIDTH - width,
+        Math.round(payload.cursor.x - width / 2),
+      ),
+    );
+    const y = Math.max(
+      0,
+      Math.min(
+        BASE_STAGE_HEIGHT - height,
+        Math.round(payload.cursor.y - height / 2),
+      ),
+    );
+    const fallbackRect = { x, y, width, height };
+    this.lastTypingTargetRect = fallbackRect;
+    this.lastTypingTargetRectAt = nowMs;
+    return fallbackRect;
   }
 
   private _actionPriority(actionType: AgentEventPayload["action_type"]): number {
