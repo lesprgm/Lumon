@@ -13,7 +13,6 @@ import {
   sessionBootstrapFromUrl,
 } from "./lib/sessionBootstrap";
 import { buildWebRTCRequestPayload, normalizeStreamProfile } from "./lib/streamProfile";
-import { readStoredSpriteFamily, writeStoredSpriteFamily } from "./lib/spriteSelection";
 import {
   buildReviewStepSummary,
   defaultReviewSelection,
@@ -29,14 +28,14 @@ import { SessionSocket } from "./lib/sessionSocket";
 import { LUMON_FRONTEND_FEATURES, LUMON_FRONTEND_RUNTIME_VERSION } from "./runtimeInfo";
 import { WebRTCClient, type WebRTCStatus } from "./lib/webrtcClient";
 import { OverlayEngine, type SceneSnapshot, resolveHotspotFromEvent, spriteTargetFromHotspot } from "./overlay/engine/overlayEngine";
-import { getSpriteSet, preloadSpriteFrames, SpritePlayer, type LumonActionType, type SpriteFamily } from "./overlay/sprites";
+import { getSpriteSet, preloadSpriteFrames, SpritePlayer, type LumonActionType } from "./overlay/sprites";
+import type { SpriteFamily } from "./overlay/sprites";
 import type {
   ActionType,
   AgentEventPayload,
   AnyClientEnvelope,
   AnyServerEnvelope,
   ApprovalRequiredPayload,
-  BrowserContextPayload,
   BridgeOfferPayload,
   InteractionMode,
   SessionArtifactResponse,
@@ -49,7 +48,45 @@ import { initialSessionStoreState, sessionStoreReducer } from "./store/sessionSt
 const REPLAY_MODE = import.meta.env.VITE_LUMON_REPLAY === "true";
 const WEBRTC_ENABLED = import.meta.env.VITE_LUMON_WEBRTC !== "false";
 const REVIEW_PLAYBACK_BASE_INTERVAL_MS = 1400;
+const REVIEW_EVENT_LIMIT = 1200;
+const REVIEW_COMMAND_LIMIT = 400;
 const REVIEW_RETURN_URL_KEY = "lumon.review.return_url";
+const TAKEOVER_MODE_PREFERENCE_KEY = "lumon.takeover.mode.preference";
+const TAKEOVER_MODE_PREFERENCE_VERSION_KEY = "lumon.takeover.mode.preference.version";
+const TAKEOVER_MODE_PREFERENCE_VERSION = "2";
+
+type TakeoverModePreference = "remote" | "direct";
+
+function messageAdapterRunId(message: AnyServerEnvelope): string | null {
+  if (message.type === "session_state") {
+    return message.payload.adapter_run_id;
+  }
+  if (message.type === "agent_event") {
+    return message.payload.adapter_run_id;
+  }
+  if (message.type === "browser_context_update") {
+    return message.payload.adapter_run_id;
+  }
+  if (message.type === "background_worker_update") {
+    return message.payload.adapter_run_id;
+  }
+  if (message.type === "approval_required") {
+    return message.payload.adapter_run_id;
+  }
+  if (message.type === "bridge_offer") {
+    return message.payload.adapter_run_id;
+  }
+  if (message.type === "task_result") {
+    return message.payload.adapter_run_id;
+  }
+  if (message.type === "browser_command") {
+    const adapterRunId = message.payload.meta?.adapter_run_id;
+    return typeof adapterRunId === "string" && adapterRunId.trim().length > 0
+      ? adapterRunId
+      : null;
+  }
+  return null;
+}
 
 function buildReviewRunUrl(
   sessionId: string,
@@ -58,6 +95,10 @@ function buildReviewRunUrl(
   const reviewParams = new URLSearchParams({ review_session: sessionId });
   const suffix = locationLike.hash || "";
   return `${locationLike.pathname}?${reviewParams.toString()}${suffix}`;
+}
+
+function resolveLobsterOnlySpriteFamily() {
+  return "lobster" as const;
 }
 
 function buildLiveRunUrl(locationLike: Pick<Location, "pathname" | "hash"> = window.location): string {
@@ -77,6 +118,39 @@ function readReviewReturnUrl(): string | null {
     return window.sessionStorage.getItem(REVIEW_RETURN_URL_KEY);
   } catch {
     return null;
+  }
+}
+
+function readStoredTakeoverModePreference(): TakeoverModePreference {
+  try {
+    const stored = window.localStorage.getItem(TAKEOVER_MODE_PREFERENCE_KEY);
+    const storedVersion = window.localStorage.getItem(
+      TAKEOVER_MODE_PREFERENCE_VERSION_KEY,
+    );
+    if (stored === "direct") {
+      return stored;
+    }
+    if (stored === "remote") {
+      if (storedVersion === TAKEOVER_MODE_PREFERENCE_VERSION) {
+        return "remote";
+      }
+      return "direct";
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+  return "direct";
+}
+
+function writeStoredTakeoverModePreference(mode: TakeoverModePreference): void {
+  try {
+    window.localStorage.setItem(TAKEOVER_MODE_PREFERENCE_KEY, mode);
+    window.localStorage.setItem(
+      TAKEOVER_MODE_PREFERENCE_VERSION_KEY,
+      TAKEOVER_MODE_PREFERENCE_VERSION,
+    );
+  } catch {
+    // Ignore storage failures.
   }
 }
 
@@ -193,23 +267,6 @@ function buildPreviewState(search: string): {
   };
 }
 
-function buildManualControlIntervention(browserContext: BrowserContextPayload | null): ActiveIntervention {
-  return {
-    interventionId: `manual_${browserContext?.session_id ?? "active"}`,
-    kind: "manual_control",
-    headline: "You are in control",
-    reasonText: "The agent is paused until you return control.",
-    sourceUrl: browserContext?.url ?? null,
-    targetSummary: browserContext?.title ?? null,
-    recommendedAction: "return_control",
-    summaryText: "Manual control is active.",
-    intent: "Take over the page until you are ready to return control.",
-    checkpointId: null,
-    sourceEventId: null,
-    riskReason: null,
-  };
-}
-
 function toSpriteActionType(actionType: ActionType): ActionType {
   if (actionType === "spawn_subagent") return "wait";
   if (actionType === "subagent_result") return "complete";
@@ -302,7 +359,7 @@ function buildReviewSnapshot(
 export default function App() {
   const [state, dispatch] = useReducer(sessionStoreReducer, initialSessionStoreState);
   const [leftRailCollapsed, setLeftRailCollapsed] = useState(true);
-  const [spriteFamily, setSpriteFamily] = useState<SpriteFamily>(() => readStoredSpriteFamily());
+  const [spriteFamily] = useState(() => resolveLobsterOnlySpriteFamily());
   const [isNavigating, setIsNavigating] = useState(false);
   const [snapshot, setSnapshot] = useState<SceneSnapshot>({
     frameSrc: null,
@@ -331,6 +388,9 @@ export default function App() {
   const [webrtcStatus, setWebrtcStatus] = useState<WebRTCStatus>("idle");
   const [webrtcRetryNonce, setWebrtcRetryNonce] = useState(0);
   const [frameFps, setFrameFps] = useState<number | null>(null);
+  const [takeoverModePreference, setTakeoverModePreference] =
+    useState<TakeoverModePreference>(() => readStoredTakeoverModePreference());
+  const [takeoverPending, setTakeoverPending] = useState(false);
   const engineRef = useRef<OverlayEngine | null>(null);
   const socketRef = useRef<SessionSocket | null>(null);
   const webrtcRef = useRef<WebRTCClient | null>(null);
@@ -338,6 +398,7 @@ export default function App() {
   const frameTimesRef = useRef<number[]>([]);
   const previewState = useMemo(() => buildPreviewState(window.location.search), []);
   const uiReadySessionRef = useRef<string | null>(null);
+  const activeAdapterRunIdRef = useRef<string | null>(null);
   const searchParams = useMemo(() => new URLSearchParams(window.location.search), []);
   const reviewSessionId = searchParams.get("review_session");
   const streamProfile = useMemo(
@@ -350,6 +411,11 @@ export default function App() {
   );
   const backendOrigin = useMemo(() => getBackendOrigin(), []);
   const isReviewMode = Boolean(reviewSessionId);
+  const isDirectTakeoverActive =
+    state.session?.interaction_mode === "takeover" &&
+    (state.session?.takeover_mode === "direct" ||
+      (state.session?.takeover_mode == null &&
+        state.session?.capabilities?.supports_direct_takeover === true));
   const spriteSet = useMemo(() => getSpriteSet(spriteFamily), [spriteFamily]);
 
   if (!engineRef.current) {
@@ -357,10 +423,13 @@ export default function App() {
   }
 
   useEffect(() => {
-    writeStoredSpriteFamily(spriteFamily);
     preloadSpriteFrames(spriteSet.manifest, spriteSet.assetBasePath).catch(() => undefined);
     engineRef.current?.setSpriteSet(spriteSet);
   }, [spriteFamily, spriteSet]);
+
+  useEffect(() => {
+    writeStoredTakeoverModePreference(takeoverModePreference);
+  }, [takeoverModePreference]);
 
   const [fallbackModeDebounced, setFallbackModeDebounced] = useState(false);
   const fallbackEntryTimeRef = useRef<number>(0);
@@ -370,7 +439,12 @@ export default function App() {
     if (isReviewMode) {
       return;
     }
-    const showVideo = Boolean(webrtcStream) && webrtcStatus !== "failed" && webrtcStatus !== "disconnected" && webrtcStatus !== "closed";
+    const showVideo =
+      Boolean(webrtcStream) &&
+      webrtcStatus !== "failed" &&
+      webrtcStatus !== "disconnected" &&
+      webrtcStatus !== "closed" &&
+      !isDirectTakeoverActive;
     const hasVisibleBrowserTarget =
       Boolean(state.browserContext?.url) &&
       state.browserContext?.url !== "about:blank" &&
@@ -399,7 +473,16 @@ export default function App() {
         setFallbackModeDebounced(false);
       }, remainingHoldTime);
     }
-  }, [isReviewMode, webrtcStream, webrtcStatus, state.browserContext, state.session?.capabilities?.supports_frames, snapshot.frameSrc, fallbackModeDebounced]);
+  }, [
+    fallbackModeDebounced,
+    isDirectTakeoverActive,
+    isReviewMode,
+    snapshot.frameSrc,
+    state.browserContext,
+    state.session?.capabilities?.supports_frames,
+    webrtcStatus,
+    webrtcStream,
+  ]);
 
   useEffect(() => {
     engineRef.current?.setFallbackMode(fallbackModeDebounced);
@@ -435,7 +518,15 @@ export default function App() {
     setReviewError(null);
     void (async () => {
       try {
-        const response = await fetch(`${backendOrigin}/api/session-artifacts/${reviewSessionId}`, {
+        const reviewUrl = new URL(
+          `${backendOrigin}/api/session-artifacts/${reviewSessionId}`,
+        );
+        reviewUrl.searchParams.set("event_limit", String(REVIEW_EVENT_LIMIT));
+        reviewUrl.searchParams.set(
+          "command_limit",
+          String(REVIEW_COMMAND_LIMIT),
+        );
+        const response = await fetch(reviewUrl.toString(), {
           headers: { Accept: "application/json" },
         });
         if (!response.ok) {
@@ -566,6 +657,7 @@ export default function App() {
     if (localInteractionModeOverride === "takeover" && serverInteractionMode === "takeover") {
       setLocalInteractionModeOverride(null);
       setLocalActiveInterventionOverride(null);
+      setTakeoverPending(false);
       return;
     }
     if (localInteractionModeOverride === "watch" && serverInteractionMode !== "takeover") {
@@ -574,13 +666,41 @@ export default function App() {
     }
   }, [localInteractionModeOverride, previewState.interactionModeOverride, state.session?.interaction_mode]);
 
+  useEffect(() => {
+    activeAdapterRunIdRef.current = state.adapterRunId || null;
+  }, [state.adapterRunId]);
+
   const handleServerMessage = (message: AnyServerEnvelope) => {
+    const messageRunId = messageAdapterRunId(message);
+    const activeRunId = activeAdapterRunIdRef.current;
+    // Drop stale non-session payloads from older runs so late websocket events
+    // cannot overwrite the current live UI state after a run handoff.
+    if (
+      messageRunId &&
+      activeRunId &&
+      messageRunId !== activeRunId &&
+      message.type !== "session_state"
+    ) {
+      sendUiTelemetry({
+        event: "video_quality_sample",
+        meta: {
+          stale_message_dropped: true,
+          stale_message_type: message.type,
+          stale_adapter_run_id: messageRunId,
+          active_adapter_run_id: activeRunId,
+        },
+      });
+      return;
+    }
     dispatch({ type: "server_message", payload: message });
     if (WEBRTC_ENABLED) {
       webrtcRef.current?.handleServerMessage(message);
     }
     if (message.type === "session_state") {
       engineRef.current?.applySessionState(message.payload);
+    }
+    if (message.type === "task_result") {
+      engineRef.current?.applyTaskResult(message.payload);
     }
     if (message.type === "frame") {
       engineRef.current?.enqueueFrame(message.payload);
@@ -596,6 +716,11 @@ export default function App() {
           setFrameFps((times.length - 1) / elapsed);
         }
       }
+    }
+    if (message.type === "task_result") {
+      setTakeoverPending(false);
+      setLocalInteractionModeOverride(null);
+      setLocalActiveInterventionOverride(null);
     }
     if (message.type === "agent_event") {
       engineRef.current?.enqueueEvent(message.payload);
@@ -619,17 +744,58 @@ export default function App() {
       dispatch({ type: "resolve_intervention_local", payload: { resolution: "denied" } });
     }
     if (message.type === "start_takeover") {
-      setLocalInteractionModeOverride("takeover");
-      setLocalActiveInterventionOverride(buildManualControlIntervention(state.browserContext));
+      setLocalInteractionModeOverride("watch");
+      setLocalActiveInterventionOverride(null);
+      setTakeoverPending(true);
       dispatch({ type: "resolve_intervention_local", payload: { resolution: "taken_over" } });
     }
     if (message.type === "end_takeover") {
       setLocalInteractionModeOverride("watch");
       setLocalActiveInterventionOverride(null);
+      setTakeoverPending(false);
       dispatch({ type: "resolve_intervention_local", payload: { resolution: "taken_over" } });
     }
     socketRef.current?.send(message);
   };
+
+  const handleReturnControl = useCallback(() => {
+    sendCommand({ type: "end_takeover", payload: {} });
+  }, [sendCommand]);
+
+  useEffect(() => {
+    if (REPLAY_MODE || isReviewMode) {
+      return;
+    }
+    const interactionMode =
+      previewState.interactionModeOverride ??
+      localInteractionModeOverride ??
+      state.session?.interaction_mode ??
+      "watch";
+    if (interactionMode !== "takeover") {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      handleReturnControl();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [
+    handleReturnControl,
+    isReviewMode,
+    localInteractionModeOverride,
+    previewState.interactionModeOverride,
+    state.session?.interaction_mode,
+  ]);
+
+  useEffect(() => {
+    if ((state.session?.interaction_mode ?? "watch") === "takeover") {
+      setTakeoverPending(false);
+    }
+  }, [state.session?.interaction_mode]);
 
   const sendUiTelemetry = useCallback((payload: UiTelemetryPayload) => {
     if (REPLAY_MODE || isReviewMode || state.connectionState !== "connected") {
@@ -645,6 +811,27 @@ export default function App() {
       },
     });
   }, [isReviewMode, state.connectionState]);
+
+  useEffect(() => {
+    if (REPLAY_MODE || isReviewMode) {
+      return;
+    }
+    const emitVisibility = () => {
+      sendUiTelemetry({
+        event: "video_quality_sample",
+        meta: {
+          visibility_state: document.visibilityState,
+          hidden: document.hidden,
+        },
+      });
+    };
+    emitVisibility();
+    const onVisibilityChange = () => emitVisibility();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [isReviewMode, sendUiTelemetry]);
 
   useEffect(() => {
     if (!WEBRTC_ENABLED || REPLAY_MODE || isReviewMode) {
@@ -934,8 +1121,7 @@ export default function App() {
         showActivityToggle={isReviewMode}
         reviewActionLabel={reviewActionLabel}
         onReviewAction={reviewActionLabel ? handleReviewAction : null}
-        spriteFamily={spriteFamily}
-        onSpriteFamilyChange={setSpriteFamily}
+        onReturnControl={effectiveInteractionMode === "takeover" ? handleReturnControl : null}
       />
       <main className={`main-grid${leftRailCollapsed ? " left-collapsed" : ""}`}>
         <section className="stage-workspace">
@@ -1019,11 +1205,11 @@ export default function App() {
               />
             </div>
           ) : null}
-          <LiveStage
-            snapshot={renderedSnapshot}
-            hasAgentActivity={renderedSessionLikeState.lastEventSeq > 0}
-            sessionId={renderedSessionLikeState.session?.session_id}
-            adapterId={renderedSessionLikeState.activeAdapterId}
+            <LiveStage
+              snapshot={renderedSnapshot}
+              hasAgentActivity={renderedSessionLikeState.lastEventSeq > 0}
+              sessionId={renderedSessionLikeState.session?.session_id}
+              adapterId={renderedSessionLikeState.activeAdapterId}
             taskText={renderedSessionLikeState.session?.task_text ?? "Watching your current task"}
             supportsFrames={renderedSessionLikeState.session?.capabilities.supports_frames ?? Boolean(renderedSnapshot.frameSrc)}
             videoStream={WEBRTC_ENABLED ? webrtcStream : null}
@@ -1036,11 +1222,28 @@ export default function App() {
             interactionMode={effectiveInteractionMode}
             observerMode={Boolean(renderedSessionLikeState.session?.observer_mode)}
             reviewMode={isReviewMode}
-            onCommand={sendCommand}
-            onUiTelemetry={sendUiTelemetry}
-            sessionStatus={renderedSessionLikeState.session?.state}
-            onStageReady={handleStageReady}
-          />
+            onCommand={(message) => {
+              if (message.type === "start_takeover") {
+                sendCommand({
+                  ...message,
+                  payload: {
+                    ...(message.payload ?? {}),
+                    mode_preference: takeoverModePreference,
+                  },
+                });
+                return;
+              }
+              sendCommand(message);
+            }}
+              onUiTelemetry={sendUiTelemetry}
+              sessionStatus={renderedSessionLikeState.session?.state}
+              takeoverMode={renderedSessionLikeState.session?.takeover_mode ?? null}
+              takeoverUrl={renderedSessionLikeState.session?.takeover_url ?? null}
+              onStageReady={handleStageReady}
+              takeoverPending={takeoverPending}
+              takeoverModePreference={takeoverModePreference}
+              onTakeoverModePreferenceChange={setTakeoverModePreference}
+            />
         </section>
       </main>
     </div>

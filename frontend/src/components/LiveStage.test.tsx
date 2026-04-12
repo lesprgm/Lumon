@@ -2,8 +2,8 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { LiveStage, resolveCaptionLayout, resolveMainSpriteStyle } from "./LiveStage";
 import {
@@ -53,6 +53,8 @@ const SESSION: SessionStatePayload = {
   session_id: "sess_test",
   adapter_id: "playwright_native",
   adapter_run_id: "run_test",
+  takeover_mode: "remote",
+  takeover_url: null,
   state: "running",
   interaction_mode: "watch",
   active_checkpoint_id: null,
@@ -60,6 +62,10 @@ const SESSION: SessionStatePayload = {
   viewport: { width: 1280, height: 800 },
   capabilities: CAPABILITIES,
 };
+
+afterEach(() => {
+  cleanup();
+});
 
 describe("LiveStage takeover control", () => {
   it("shows region-specific takeover comments for the current top-bar perch", () => {
@@ -76,8 +82,6 @@ describe("LiveStage takeover control", () => {
         state={{ ...initialSessionStoreState, connectionState: "connected", session: takeoverSession }}
         leftRailCollapsed={false}
         onToggleLeftRail={() => {}}
-        spriteFamily="lobster"
-        onSpriteFamilyChange={() => {}}
       />,
     );
 
@@ -106,14 +110,29 @@ describe("LiveStage takeover control", () => {
         }}
         leftRailCollapsed={false}
         onToggleLeftRail={() => {}}
-        spriteFamily="lobster"
-        onSpriteFamilyChange={() => {}}
       />,
     );
 
     const sprite = container.querySelector(".status-idle-sprite");
     expect(sprite).not.toBeNull();
     expect(sprite?.getAttribute("data-status-sprite-mode")).toBe("takeover");
+  });
+
+  it("hides the top-bar mascot while the session is running", () => {
+    const { container } = render(
+      <StatusBar
+        state={{
+          ...initialSessionStoreState,
+          connectionState: "connected",
+          session: { ...SESSION, state: "running", interaction_mode: "watch" },
+        }}
+        leftRailCollapsed={false}
+        onToggleLeftRail={() => {}}
+      />,
+    );
+
+    const sprite = container.querySelector(".status-idle-sprite");
+    expect(sprite).toBeNull();
   });
 
   it("shows the guaranteed rentahuman comment on takeover entry", () => {
@@ -129,8 +148,6 @@ describe("LiveStage takeover control", () => {
         }}
         leftRailCollapsed={false}
         onToggleLeftRail={() => {}}
-        spriteFamily="lobster"
-        onSpriteFamilyChange={() => {}}
       />,
     );
 
@@ -209,14 +226,12 @@ describe("LiveStage takeover control", () => {
         }}
         leftRailCollapsed={false}
         onToggleLeftRail={() => {}}
-        spriteFamily="lobster"
-        onSpriteFamilyChange={() => {}}
       />,
     );
 
     const sprite = container.querySelector(".status-idle-sprite");
-    expect(sprite?.getAttribute("data-status-sprite-frame")).toBe("4");
-    expect(sprite?.getAttribute("src")).toContain("reading_04.png");
+    expect(sprite?.getAttribute("data-status-sprite-frame")).toBe("5");
+    expect(sprite?.getAttribute("src")).toContain("reading_06.png");
     expect(sprite?.className).toContain("status-idle-sprite-is-held");
   });
 
@@ -229,8 +244,6 @@ describe("LiveStage takeover control", () => {
           state={{ ...initialSessionStoreState, connectionState: "connected", session: SESSION }}
           leftRailCollapsed={false}
           onToggleLeftRail={() => {}}
-          spriteFamily="lobster"
-          onSpriteFamilyChange={() => {}}
         />
         <main className="main-grid">
           <section className="stage-workspace">
@@ -253,15 +266,96 @@ describe("LiveStage takeover control", () => {
               reviewMode={false}
               onCommand={onCommand}
               sessionStatus="running"
+              takeoverPending={false}
+              takeoverModePreference="direct"
+              onTakeoverModePreferenceChange={() => {}}
             />
           </section>
         </main>
       </div>,
     );
 
+    expect(screen.getByRole("button", { name: "In Lumon" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Browser window" })).toBeTruthy();
+
     fireEvent.click(screen.getByRole("button", { name: "Take over" }));
 
-    expect(onCommand).toHaveBeenCalledWith({ type: "start_takeover", payload: {} });
+    expect(onCommand).toHaveBeenCalledWith({
+      type: "start_takeover",
+      payload: { mode_preference: "direct" },
+    });
+  });
+
+  it("switches takeover mode preference in the header and starts direct takeover", () => {
+    const onCommand = vi.fn();
+    const onTakeoverModePreferenceChange = vi.fn();
+
+    render(
+      <LiveStage
+        snapshot={SNAPSHOT}
+        onStageReady={() => {}}
+        hasAgentActivity={false}
+        adapterId="playwright_native"
+        taskText={SESSION.task_text}
+        supportsFrames
+        videoStream={null}
+        videoStatus="idle"
+        frameFps={null}
+        isNavigating={false}
+        activeIntervention={null}
+        browserContext={BROWSER_CONTEXT}
+        capabilities={{ ...CAPABILITIES, supports_direct_takeover: true }}
+        interactionMode="watch"
+        observerMode={false}
+        reviewMode={false}
+        onCommand={onCommand}
+        sessionStatus="running"
+        takeoverPending={false}
+        takeoverModePreference="direct"
+        onTakeoverModePreferenceChange={onTakeoverModePreferenceChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Browser window" }));
+    expect(onTakeoverModePreferenceChange).toHaveBeenCalledWith("direct");
+
+    fireEvent.click(screen.getByRole("button", { name: "Take over" }));
+    expect(onCommand).toHaveBeenCalledWith({
+      type: "start_takeover",
+      payload: { mode_preference: "direct" },
+    });
+  });
+
+  it("shows restoring live feed indicator during remote takeover without frame", () => {
+    render(
+      <LiveStage
+        snapshot={{ ...SNAPSHOT, frameSrc: null }}
+        onStageReady={() => {}}
+        hasAgentActivity={false}
+        adapterId="playwright_native"
+        taskText={SESSION.task_text}
+        supportsFrames
+        videoStream={null}
+        videoStatus="idle"
+        frameFps={null}
+        isNavigating={false}
+        activeIntervention={null}
+        browserContext={{ ...BROWSER_CONTEXT, url: "https://www.wikipedia.org", domain: "www.wikipedia.org" }}
+        capabilities={{ ...CAPABILITIES, supports_direct_takeover: true }}
+        interactionMode="takeover"
+        observerMode={false}
+        reviewMode={false}
+        onCommand={() => {}}
+        sessionStatus="running"
+        takeoverMode="remote"
+        takeoverUrl="https://www.wikipedia.org"
+        takeoverPending={false}
+        takeoverModePreference="remote"
+        onTakeoverModePreferenceChange={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("Restoring live feed...")).toBeTruthy();
   });
 
   it("hides the activity toggle in the status bar when live activity is suppressed", () => {
@@ -271,8 +365,6 @@ describe("LiveStage takeover control", () => {
         leftRailCollapsed={true}
         onToggleLeftRail={() => {}}
         showActivityToggle={false}
-        spriteFamily="lobster"
-        onSpriteFamilyChange={() => {}}
       />,
     );
 
@@ -306,7 +398,7 @@ describe("LiveStage takeover control", () => {
       { width: 1920, height: 1080 },
     );
 
-    expect(style).toEqual({ left: 394, top: 190 });
+    expect(style).toEqual({ left: 388, top: 190 });
   });
 
   it("attaches the caption bubble to the sprite instead of the target hotspot", () => {
@@ -517,6 +609,66 @@ describe("LiveStage takeover control", () => {
     expect(scoped.getByText("You are in control")).toBeTruthy();
   });
 
+  it("shows direct takeover guidance with the real page url", () => {
+    const view = render(
+      <LiveStage
+        snapshot={SNAPSHOT}
+        onStageReady={() => {}}
+        hasAgentActivity={false}
+        adapterId="playwright_native"
+        taskText={SESSION.task_text}
+        supportsFrames
+        videoStream={null}
+        videoStatus="idle"
+        frameFps={null}
+        isNavigating={false}
+        activeIntervention={null}
+        browserContext={BROWSER_CONTEXT}
+        capabilities={{ ...CAPABILITIES, supports_direct_takeover: true }}
+        interactionMode="takeover"
+        observerMode={false}
+        reviewMode={false}
+        onCommand={() => {}}
+        sessionStatus="takeover"
+        takeoverMode="direct"
+        takeoverUrl="https://www.wikipedia.org/wiki/OpenAI"
+      />,
+    );
+
+    expect(view.container.querySelector(".takeover-direct-hint")).not.toBeNull();
+    expect(screen.getByText("You are controlling the real browser window")).toBeTruthy();
+    expect(screen.getByText("https://www.wikipedia.org/wiki/OpenAI")).toBeTruthy();
+  });
+
+  it("prefers frame feed over webrtc video in direct sessions", () => {
+    const view = render(
+      <LiveStage
+        snapshot={{ ...SNAPSHOT, frameSrc: "/frames/direct.png" }}
+        onStageReady={() => {}}
+        hasAgentActivity={false}
+        adapterId="playwright_native"
+        taskText={SESSION.task_text}
+        supportsFrames
+        videoStream={{} as MediaStream}
+        videoStatus="connected"
+        frameFps={null}
+        isNavigating={false}
+        activeIntervention={null}
+        browserContext={BROWSER_CONTEXT}
+        capabilities={{ ...CAPABILITIES, supports_direct_takeover: true }}
+        interactionMode="watch"
+        observerMode={false}
+        reviewMode={false}
+        onCommand={() => {}}
+        sessionStatus="running"
+        takeoverMode="direct"
+      />,
+    );
+
+    expect(view.container.querySelector("video.browser-feed-video")).toBeNull();
+    expect(view.container.querySelector("img.browser-feed")).not.toBeNull();
+  });
+
   it("shows the in-stage main sprite on first mount in watch mode", () => {
     vi.stubEnv("VITE_LUMON_OVERLAY_SPRITES", "true");
     const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
@@ -604,16 +756,8 @@ describe("LiveStage takeover control", () => {
   it("shows the waiting-for-page reason before the first visible frame", () => {
     const liveSnapshot: SceneSnapshot = {
       ...SNAPSHOT,
-      frameSrc: "/frames/live.png",
-      mainAgent: {
-        id: "main_001",
-        x: 420,
-        y: 260,
-        framePath: "/assets/lobster/idle/frames/idle_00.png",
-        kind: "main",
-        summaryText: "Watching the page",
-        movementState: "anchored",
-      },
+      frameSrc: null,
+      mainAgent: null,
     };
 
     render(

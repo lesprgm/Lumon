@@ -87,6 +87,18 @@ function browserContextLabel(environmentType: BrowserContextPayload["environment
   }
 }
 
+function toBootstrapActionType(
+  actionType: AgentEventPayload["action_type"] | null,
+): SpriteRuntimeInput["actionType"] {
+  if (actionType === "spawn_subagent") {
+    return "wait";
+  }
+  if (actionType === "subagent_result") {
+    return "complete";
+  }
+  return actionType ?? undefined;
+}
+
 function resolveBootstrapRuntimeInput(snapshot: SceneSnapshot): SpriteRuntimeInput {
   const sessionState: LumonSessionState =
     snapshot.sessionState === "completed" ||
@@ -102,7 +114,7 @@ function resolveBootstrapRuntimeInput(snapshot: SceneSnapshot): SpriteRuntimeInp
       : "running";
   return {
     sessionState,
-    actionType: snapshot.mainActionType ?? undefined,
+    actionType: toBootstrapActionType(snapshot.mainActionType),
     isMoving: false,
   };
 }
@@ -132,7 +144,7 @@ export function resolveMainSpriteStyle(
   }
   if (snapshot.typing && snapshot.targetRect) {
     return {
-      left: snapSpritePosition(scaleX(snapshot.targetRect.x, stageDimensions.width) - 6),
+      left: snapSpritePosition(scaleX(snapshot.targetRect.x, stageDimensions.width) - 12),
       top: snapSpritePosition(scaleY(snapshot.targetRect.y, stageDimensions.height) - 50),
     };
   }
@@ -218,6 +230,11 @@ export function LiveStage({
   onCommand,
   onUiTelemetry,
   sessionStatus,
+  takeoverMode,
+  takeoverUrl,
+  takeoverPending = false,
+  takeoverModePreference,
+  onTakeoverModePreferenceChange,
 }: {
   snapshot: SceneSnapshot;
   onStageReady: (ready: boolean) => void;
@@ -239,6 +256,11 @@ export function LiveStage({
   onCommand: (message: AnyClientEnvelope) => void;
   onUiTelemetry?: (payload: UiTelemetryPayload) => void;
   sessionStatus?: string;
+  takeoverMode?: "remote" | "direct" | null;
+  takeoverUrl?: string | null;
+  takeoverPending?: boolean;
+  takeoverModePreference?: "remote" | "direct";
+  onTakeoverModePreferenceChange?: (mode: "remote" | "direct") => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -263,10 +285,24 @@ export function LiveStage({
   const renderSprites = reviewMode || !overlaySpritesDisabled;
   const showStageSprites =
     renderSprites && interactionMode !== "takeover" && activeIntervention?.kind !== "manual_control";
-  const showVideo = Boolean(videoStream) && videoStatus !== "failed";
+  const isDirectSession =
+    takeoverMode === "direct" ||
+    (takeoverMode == null && capabilities?.supports_direct_takeover === true);
+  const showVideo = Boolean(videoStream) && videoStatus !== "failed" && !isDirectSession;
   const isTakeoverInterventionActive =
     (interactionMode === "takeover" || activeIntervention?.kind === "manual_control") &&
     activeIntervention?.kind !== "approval";
+  const isDirectTakeover =
+    interactionMode === "takeover" &&
+    isDirectSession;
+  const effectiveTakeoverModePreference =
+    takeoverModePreference === "direct" || takeoverModePreference === "remote"
+      ? takeoverModePreference
+      : "direct";
+  const directTakeoverAvailable = capabilities?.supports_direct_takeover === true;
+  const directTakeoverPageUrl =
+    (typeof takeoverUrl === "string" && takeoverUrl.trim().length > 0 ? takeoverUrl : null) ??
+    (typeof browserContext?.url === "string" && browserContext.url.trim().length > 0 ? browserContext.url : null);
   const hasVisibleBrowserTarget =
     Boolean(browserContext?.url) &&
     browserContext?.url !== "about:blank" &&
@@ -573,6 +609,13 @@ export function LiveStage({
   const placeholderNote = reviewMode
     ? "Review mode can still show the page, domain, intervention state, and command results even when no keyframe was captured."
     : snapshot.caption || "Lumon stays quiet until there is a page worth watching.";
+  const remoteTakeoverRestoringFeed =
+    interactionMode === "takeover" &&
+    !isDirectTakeover &&
+    supportsFrames &&
+    hasVisibleBrowserTarget &&
+    !snapshot.frameSrc &&
+    !showVideo;
 
 
 
@@ -581,9 +624,13 @@ export function LiveStage({
 
 
 
-  const canRemoteControl = (interactionMode === "takeover" || sessionStatus === "completed" || sessionStatus === "stopped" || sessionStatus === "failed") && !reviewMode;
-
-  const shouldBlur = activeIntervention?.kind === "approval" || activeIntervention?.kind === "live_browser_view";
+  const canRemoteControl =
+    (interactionMode === "takeover" ||
+      sessionStatus === "completed" ||
+      sessionStatus === "stopped" ||
+      sessionStatus === "failed") &&
+    !reviewMode &&
+    !isDirectTakeover;
 
   const handleCollapseTakeoverCard = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
@@ -654,7 +701,9 @@ export function LiveStage({
     tabIndex={0}
     style={{ outline: "none" }}
   >
-      <div className={`stage-frame ${interactionMode === "takeover" ? "is-takeover" : ""}`}>
+      <div
+        className={`stage-frame ${interactionMode === "takeover" ? "is-takeover" : ""} ${isDirectTakeover ? "is-takeover-direct" : ""}`}
+      >
         <div className="stage-chrome stage-chrome-top">
           <div className="stage-browser-shell">
             <div className="stage-browser-dots" aria-hidden="true">
@@ -672,34 +721,75 @@ export function LiveStage({
               </div>
             ) : null}
             {capabilities?.supports_takeover && !reviewMode ? (
-              <button
-                type="button"
-                className={`intervention-button ${interactionMode === "takeover" ? "intervention-button-primary" : "intervention-button-soft"}`}
-                style={{ marginLeft: "auto", padding: "2px 8px", fontSize: "12px", minHeight: "24px" }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (interactionMode === "takeover") {
-                    onCommand({ type: "end_takeover", payload: {} });
-                  } else {
-                    onCommand({ type: "start_takeover", payload: {} });
-                  }
-                }}
-              >
-                {interactionMode === "takeover" ? "Return control" : "Take over"}
-              </button>
+              <div className="takeover-controls-inline">
+                {interactionMode !== "takeover" ? (
+                  <div className="takeover-mode-switch" role="group" aria-label="Takeover mode">
+                    <button
+                      type="button"
+                      className={`takeover-mode-option ${effectiveTakeoverModePreference === "remote" ? "is-active" : ""}`}
+                      aria-pressed={effectiveTakeoverModePreference === "remote"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onTakeoverModePreferenceChange?.("remote");
+                      }}
+                    >
+                      In Lumon
+                    </button>
+                    <button
+                      type="button"
+                      className={`takeover-mode-option ${effectiveTakeoverModePreference === "direct" ? "is-active" : ""}`}
+                      aria-pressed={effectiveTakeoverModePreference === "direct"}
+                      disabled={!directTakeoverAvailable}
+                      title={directTakeoverAvailable ? "Control the real browser window" : "Direct takeover unavailable in this session"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!directTakeoverAvailable) {
+                          return;
+                        }
+                        onTakeoverModePreferenceChange?.("direct");
+                      }}
+                    >
+                      Browser window
+                    </button>
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  className={`intervention-button ${interactionMode === "takeover" ? "intervention-button-primary" : "intervention-button-soft"}`}
+                  style={{ padding: "2px 8px", fontSize: "12px", minHeight: "24px" }}
+                  disabled={takeoverPending}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (interactionMode === "takeover") {
+                      onCommand({ type: "end_takeover", payload: {} });
+                    } else {
+                      onCommand({
+                        type: "start_takeover",
+                        payload: { mode_preference: effectiveTakeoverModePreference },
+                      });
+                    }
+                  }}
+                >
+                  {interactionMode === "takeover"
+                    ? "Return control"
+                    : takeoverPending
+                      ? "Starting takeover…"
+                      : "Take over"}
+                </button>
+              </div>
             ) : null}
           </div>
         </div>
         {showVideo ? (
           <>
-            <video className={`browser-feed browser-feed-video ${shouldBlur ? "is-blurred" : ""}`} ref={videoRef} autoPlay muted playsInline />
+            <video className="browser-feed browser-feed-video" ref={videoRef} autoPlay muted playsInline />
             {videoStatus === "connecting" ? (
               <div className="stage-connecting">Connecting live video…</div>
             ) : null}
           </>
         ) : snapshot.frameSrc ? (
           <img
-            className={`browser-feed ${shouldBlur ? "is-blurred" : ""} ${imageLoading && reviewMode ? "is-loading" : ""}`}
+            className={`browser-feed ${imageLoading && reviewMode ? "is-loading" : ""}`}
             src={snapshot.frameSrc}
             alt="Browser feed"
             onLoad={() => {
@@ -708,7 +798,13 @@ export function LiveStage({
             }}
           />
         ) : (
-          <div className={`browser-feed placeholder ${supportsFrames ? "" : "adapter-shell"} ${snapshot.fallbackMode ? "is-fallback" : ""} ${shouldBlur ? "is-blurred" : ""}`}>
+          <div className={`browser-feed placeholder ${supportsFrames ? "" : "adapter-shell"} ${snapshot.fallbackMode ? "is-fallback" : ""}`}>
+            {remoteTakeoverRestoringFeed ? (
+              <div className="stage-restoring-feed" role="status" aria-live="polite">
+                <span className="stage-restoring-dot" aria-hidden="true" />
+                Restoring live feed...
+              </div>
+            ) : null}
             {supportsFrames && hasVisibleBrowserTarget && !snapshot.fallbackMode ? (
               <div className="stage-placeholder-shell">
                 <div className="stage-placeholder-loader"></div>
@@ -869,7 +965,16 @@ export function LiveStage({
                   Deny
                 </button>
                 {capabilities?.supports_takeover ? (
-                  <button className="intervention-button intervention-button-soft" onClick={(e) => { e.stopPropagation(); onCommand({ type: "start_takeover", payload: {} }); }}>
+                  <button
+                    className="intervention-button intervention-button-soft"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCommand({
+                        type: "start_takeover",
+                        payload: { mode_preference: effectiveTakeoverModePreference },
+                      });
+                    }}
+                  >
                     Take over
                   </button>
                 ) : null}
@@ -921,8 +1026,8 @@ export function LiveStage({
                 onMouseUp={(e) => e.stopPropagation()}
               >
                 <div className="takeover-chip-copy">
-                  <span className="intervention-kicker">Manual control</span>
-                  <strong>Manual control active</strong>
+                  <span className="intervention-kicker">{isDirectTakeover ? "Direct control" : "Manual control"}</span>
+                  <strong>{isDirectTakeover ? "Direct browser control active" : "Manual control active"}</strong>
                 </div>
                 <div className="takeover-chip-actions">
                   <button
@@ -959,9 +1064,19 @@ export function LiveStage({
                   </div>
                 </div>
                 <div className="intervention-copy">
-                  <strong>{activeIntervention?.headline || "You now control the page"}</strong>
-                  <p>{activeIntervention?.reasonText || "The agent is paused here until you return control."}</p>
+                  <strong>{isDirectTakeover ? "You are controlling the real browser window" : activeIntervention?.headline || "You now control the page"}</strong>
+                  <p>
+                    {isDirectTakeover
+                      ? "Interact in the browser window directly for zero-lag control. Return control here when you want Lumon to continue."
+                      : activeIntervention?.reasonText || "The agent is paused here until you return control."}
+                  </p>
                 </div>
+                {isDirectTakeover ? (
+                  <div className="takeover-direct-hint">
+                    <span>If the browser did not come forward, switch to it with your app switcher.</span>
+                    {directTakeoverPageUrl ? <strong>{directTakeoverPageUrl}</strong> : null}
+                  </div>
+                ) : null}
                 {activeIntervention?.sourceUrl || activeIntervention?.targetSummary ? (
                   <div className="intervention-context-line">
                     {activeIntervention.sourceUrl ? <span>{activeIntervention.sourceUrl}</span> : null}

@@ -122,55 +122,6 @@ button:disabled {
   gap: 8px;
 }
 
-.sprite-family-picker-container {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.sprite-picker-label {
-  font-size: 0.72rem;
-  font-weight: 500;
-  color: #7a6d5d;
-  letter-spacing: 0.02em;
-}
-
-.sprite-family-picker {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px;
-  border-radius: 999px;
-  border: 1px solid rgba(221, 214, 204, 0.92);
-  background: rgba(255, 252, 247, 0.66);
-}
-
-.sprite-family-button {
-  min-height: 24px;
-  padding: 0 10px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: #7a6d5d;
-  font-size: 0.68rem;
-  font-weight: 650;
-  letter-spacing: 0.01em;
-  transition:
-    background 160ms ease,
-    color 160ms ease,
-    transform 160ms ease;
-}
-
-.sprite-family-button:hover {
-  color: #171411;
-  transform: translateY(-1px);
-}
-
-.sprite-family-button.is-active {
-  background: rgba(23, 20, 17, 0.9);
-  color: #fbf8f3;
-}
-
 .rail-toggle {
   min-height: 26px;
   min-width: 26px;
@@ -247,6 +198,18 @@ button:disabled {
   border-color: rgba(23, 20, 17, 0.18);
   color: #171411;
   transform: translateY(-1px);
+}
+
+.status-inline-action-primary {
+  background: #a8692e;
+  border-color: #a8692e;
+  color: #fff9f2;
+}
+
+.status-inline-action-primary:hover {
+  background: #996028;
+  border-color: #996028;
+  color: #fff9f2;
 }
 
 .status-idle-sprite {
@@ -916,6 +879,47 @@ button:disabled {
   pointer-events: auto;
 }
 
+.takeover-controls-inline {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.takeover-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border-radius: 999px;
+  border: 1px solid rgba(208, 192, 171, 0.92);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.takeover-mode-option {
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(80, 66, 45, 0.88);
+  border-radius: 999px;
+  min-height: 22px;
+  padding: 0 8px;
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.takeover-mode-option.is-active {
+  background: rgba(168, 105, 46, 0.16);
+  border-color: rgba(168, 105, 46, 0.35);
+  color: #5a3a16;
+}
+
+.takeover-mode-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .stage-browser-dots {
   display: inline-flex;
   gap: 8px;
@@ -991,12 +995,8 @@ button:disabled {
   object-position: center;
   background: #fff;
   display: block;
-  transition: opacity 0.4s ease-in-out, filter 0.4s ease-in-out;
-  animation: feed-fade-in 0.4s ease-out forwards;
-}
-
-.browser-feed.is-blurred {
-  filter: blur(4px) brightness(0.6);
+  transition: none;
+  animation: none;
 }
 
 .browser-feed.is-loading {
@@ -1219,6 +1219,45 @@ button:disabled {
   color: #7a6d5d;
   font-size: 0.86rem;
   line-height: 1.5;
+}
+
+.stage-restoring-feed {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(87, 150, 185, 0.38);
+  background: rgba(11, 20, 28, 0.68);
+  color: rgba(229, 243, 251, 0.95);
+  font-size: 0.74rem;
+  letter-spacing: 0.01em;
+}
+
+.stage-restoring-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(117, 215, 255, 0.95);
+  box-shadow: 0 0 10px rgba(117, 215, 255, 0.68);
+  animation: stage-restoring-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes stage-restoring-pulse {
+  0%,
+  100% {
+    transform: scale(0.9);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 1;
+  }
 }
 
 .stage-placeholder-skeleton {
@@ -1906,6 +1945,27 @@ button:disabled {
   padding: 0 12px;
 }
 
+.takeover-direct-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(236, 227, 216, 0.96);
+  background: rgba(255, 252, 247, 0.72);
+}
+
+.takeover-direct-hint span {
+  font-size: 0.74rem;
+  color: #7a6b59;
+}
+
+.takeover-direct-hint strong {
+  font-size: 0.78rem;
+  color: #2a211b;
+  word-break: break-word;
+}
+
 @keyframes sprite-main-float {
   0%,
   100% {
@@ -2327,11 +2387,11 @@ button:disabled {
   transition: border 0.2s ease-in-out;
 }
 
-.stage-frame.is-takeover {
+.stage-frame.is-takeover:not(.is-takeover-direct) {
   cursor: crosshair !important;
 }
 
-.stage-frame.is-takeover .browser-feed {
+.stage-frame.is-takeover:not(.is-takeover-direct) .browser-feed {
   cursor: crosshair !important;
 }
 

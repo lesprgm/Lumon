@@ -5,6 +5,14 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 
+const WebSocket = await (async () => {
+  if (typeof globalThis.WebSocket === 'function') {
+    return globalThis.WebSocket;
+  }
+  const wsModule = await import('ws');
+  return wsModule.WebSocket;
+})();
+
 import { createLumonPlugin } from '../.opencode/lib/lumonPluginCore.js';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -13,23 +21,30 @@ const OUTPUT_DIR = path.join(ROOT, 'output', 'manual_checks');
 function loadRuntimeOrigins() {
   const backendEnvPath = path.join(ROOT, 'output', 'runtime', 'lumon_backend.env');
   let backendOrigin = 'http://127.0.0.1:8000';
+  let frontendOrigin = backendOrigin;
   if (existsSync(backendEnvPath)) {
     const lines = readFileSync(backendEnvPath, 'utf8').split(/\r?\n/);
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
       const [key, ...rest] = trimmed.split('=');
+      const value = rest.join('=').trim();
       if (key === 'VITE_LUMON_BACKEND_ORIGIN') {
-        backendOrigin = rest.join('=').trim() || backendOrigin;
+        backendOrigin = value || backendOrigin;
+        continue;
+      }
+      if (key === 'VITE_LUMON_FRONTEND_ORIGIN' || key === 'LUMON_FRONTEND_ORIGIN') {
+        frontendOrigin = value || frontendOrigin;
       }
     }
   }
   const backendUrl = backendOrigin.replace(/\/$/, '');
+  const frontendUrl = (frontendOrigin || backendOrigin).replace(/\/$/, '');
   const parsed = new URL(backendUrl);
   const wsBaseUrl = `${parsed.protocol === 'https:' ? 'wss' : 'ws'}://${parsed.host}`;
   return {
     BACKEND_URL: backendUrl,
-    FRONTEND_URL: 'http://127.0.0.1:5173',
+    FRONTEND_URL: frontendUrl,
     WS_BASE_URL: wsBaseUrl,
   };
 }
@@ -53,6 +68,7 @@ function parseArgs(argv) {
     tailLines: 160,
     externalPrompt: DEFAULT_EXTERNAL_PROMPT,
     enableWs: false,
+    requireDirectTakeover: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -82,6 +98,11 @@ function parseArgs(argv) {
     }
     if (token === '--enable-ws') {
       args.enableWs = true;
+      continue;
+    }
+    if (token === '--require-direct-takeover') {
+      args.requireDirectTakeover = true;
+      continue;
     }
   }
   return args;
@@ -115,6 +136,26 @@ async function waitForHttp(url, timeoutMs = 20000) {
     await sleep(250);
   }
   throw new Error(`Timed out waiting for ${url}`);
+}
+
+function npmExecutable() {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+function ensureHarnessDependencies() {
+  try {
+    execFileSync(
+      process.execPath,
+      ['-e', 'import("ws").then(()=>process.exit(0)).catch(()=>process.exit(1))'],
+      { cwd: ROOT, stdio: 'ignore' },
+    );
+    return;
+  } catch {
+    execFileSync(npmExecutable(), ['install', '--no-audit', '--no-fund', '--save-dev', 'ws@8'], {
+      cwd: ROOT,
+      stdio: 'inherit',
+    });
+  }
 }
 
 function restartServices() {
@@ -178,16 +219,23 @@ class WebSocketCollector {
     this.closeEvent = null;
     this.socket = null;
     this.ready = false;
+    this._closedPromise = null;
+    this._closedResolve = null;
   }
 
   connect() {
     if (!this.sessionInfo?.sessionId || !this.sessionInfo?.token) {
       throw new Error('Cannot connect websocket without session/token');
     }
-    const wsUrl = `ws://127.0.0.1:8000${this.sessionInfo.wsPath}?session_id=${encodeURIComponent(this.sessionInfo.sessionId)}&token=${encodeURIComponent(this.sessionInfo.token)}`;
+    const wsUrl = `${WS_BASE_URL}${this.sessionInfo.wsPath}?session_id=${encodeURIComponent(this.sessionInfo.sessionId)}&token=${encodeURIComponent(this.sessionInfo.token)}`;
     return new Promise((resolve, reject) => {
-      const socket = new WebSocket(wsUrl);
+      const socket = new WebSocket(wsUrl, {
+        origin: FRONTEND_URL,
+      });
       this.socket = socket;
+      this._closedPromise = new Promise((closedResolve) => {
+        this._closedResolve = closedResolve;
+      });
       let settled = false;
       socket.onopen = () => {
         this.ready = true;
@@ -208,6 +256,10 @@ class WebSocketCollector {
       socket.onclose = (event) => {
         this.closeEvent = { code: event.code, reason: event.reason };
         this.messages.push({ at: Date.now(), type: 'socket_close', code: event.code, reason: event.reason });
+        if (typeof this._closedResolve === 'function') {
+          this._closedResolve();
+          this._closedResolve = null;
+        }
         if (!settled) {
           settled = true;
           resolve();
@@ -239,8 +291,13 @@ class WebSocketCollector {
     }
     if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
       this.socket.close();
-      await sleep(100);
+      if (this._closedPromise) {
+        await Promise.race([this._closedPromise, sleep(1200)]);
+      } else {
+        await sleep(150);
+      }
     }
+    this.socket = null;
   }
 }
 
@@ -270,6 +327,7 @@ function buildShellRecorder({ allowShellStarts = false }) {
 
 async function createPluginHarness() {
   const clientLogs = [];
+  const promptAsyncCalls = [];
   const shellRecorder = buildShellRecorder({ allowShellStarts: false });
   const plugin = await createLumonPlugin({
     $: shellRecorder.shell,
@@ -277,12 +335,20 @@ async function createPluginHarness() {
     worktree: ROOT,
     serverUrl: new URL('http://127.0.0.1:59207'),
     project: { id: 'proj_reliability' },
-    client: { app: { log: async (message) => clientLogs.push({ at: Date.now(), message }) } },
+    client: {
+      app: { log: async (message) => clientLogs.push({ at: Date.now(), message }) },
+      session: {
+        promptAsync: async (payload) => {
+          promptAsyncCalls.push({ at: Date.now(), payload });
+        },
+      },
+    },
   });
   return {
     plugin,
     shellRecords: shellRecorder.records,
     clientLogs,
+    promptAsyncCalls,
   };
 }
 
@@ -300,7 +366,19 @@ async function executeTool(plugin, args, context) {
   };
 }
 
-async function runTask({ plugin, shellRecords, sessionId, prompt, openUrl, scenario, emitObserverBeforeTool = true, collectorRef = null, enableWs = false }) {
+async function runTask({
+  plugin,
+  shellRecords,
+  sessionId,
+  prompt,
+  openUrl,
+  scenario,
+  emitObserverBeforeTool = true,
+  collectorRef = null,
+  enableWs = false,
+  autoApproveBlocked = true,
+  stopAfterClick = false,
+}) {
   const shellStartIndex = shellRecords.length;
   const promptOutput = {
     message: { id: `msg_${scenario}`, sessionID: sessionId, tools: { webfetch: true } },
@@ -341,16 +419,62 @@ async function runTask({ plugin, shellRecords, sessionId, prompt, openUrl, scena
 
   let sessionInfo = null;
   let collector = enableWs ? collectorRef?.collector || null : null;
-  if (begin.result?.open_url) {
-    sessionInfo = parseOpenUrl(begin.result.open_url);
-    if (enableWs && !collector) {
-      collector = new WebSocketCollector(sessionInfo);
-      await collector.connect();
-      if (collectorRef) {
-        collectorRef.collector = collector;
+
+  const refreshSessionInfoFromShell = () => {
+    if (sessionInfo) {
+      return;
+    }
+    const shellOpen = [...shellRecords.slice(shellStartIndex)]
+      .reverse()
+      .find((record) => record.kind === 'open' && typeof record.url === 'string' && record.url.includes('session_id='));
+    if (shellOpen) {
+      sessionInfo = parseOpenUrl(shellOpen.url);
+    }
+  };
+
+  const ensureCollector = async () => {
+    if (!enableWs || collector || !collectorRef) {
+      return;
+    }
+    refreshSessionInfoFromShell();
+    if (!sessionInfo?.sessionId || !sessionInfo?.token) {
+      return;
+    }
+    collector = new WebSocketCollector(sessionInfo);
+    await collector.connect();
+    collectorRef.collector = collector;
+  };
+
+  const finalizeTask = async () => {
+    if (enableWs && collector) {
+      await collector.settle(1200);
+    }
+    refreshSessionInfoFromShell();
+    let artifact = null;
+    if (sessionInfo?.sessionId) {
+      const response = await fetch(`${BACKEND_URL}/api/session-artifacts/${sessionInfo.sessionId}`);
+      if (response.ok) {
+        artifact = await response.json();
       }
     }
+    return {
+      scenario,
+      sessionId,
+      prompt,
+      promptSteered: promptOutput.message.tools?.lumon_browser === true && promptOutput.message.tools?.webfetch === false,
+      promptTools: promptOutput.message.tools,
+      sessionInfo,
+      commands,
+      artifact,
+      shellStartIndex,
+      shellEndIndex: shellRecords.length,
+    };
+  };
+
+  if (begin.result?.open_url) {
+    sessionInfo = parseOpenUrl(begin.result.open_url);
   }
+  await ensureCollector();
 
   if (openUrl) {
     const open = await executeTool(plugin, {
@@ -360,6 +484,7 @@ async function runTask({ plugin, shellRecords, sessionId, prompt, openUrl, scena
     }, context);
     commands.push(open);
     sessionInfo = sessionInfo || (open.result?.open_url ? parseOpenUrl(open.result.open_url) : null);
+    await ensureCollector();
   }
 
   const inspect = await executeTool(plugin, {
@@ -367,6 +492,7 @@ async function runTask({ plugin, shellRecords, sessionId, prompt, openUrl, scena
     command: 'inspect',
   }, context);
   commands.push(inspect);
+  await ensureCollector();
   const target = choosePrimaryTarget(inspect.result?.actionable_elements || []);
 
   if (target?.clickable) {
@@ -376,7 +502,8 @@ async function runTask({ plugin, shellRecords, sessionId, prompt, openUrl, scena
       element_id: target.element_id,
     }, context);
     commands.push(click);
-    if (enableWs && click.result?.status === 'blocked' && click.result?.checkpoint_id && collector) {
+    await ensureCollector();
+    if (enableWs && click.result?.status === 'blocked' && click.result?.checkpoint_id && collector && autoApproveBlocked) {
       collector.send({ type: 'approve', payload: { checkpoint_id: click.result.checkpoint_id } });
       await collector.settle(800);
       const postApproveStatus = await executeTool(plugin, {
@@ -384,6 +511,9 @@ async function runTask({ plugin, shellRecords, sessionId, prompt, openUrl, scena
         command: 'status',
       }, context);
       commands.push(postApproveStatus);
+    }
+    if (stopAfterClick) {
+      return await finalizeTask();
     }
   }
 
@@ -408,44 +538,57 @@ async function runTask({ plugin, shellRecords, sessionId, prompt, openUrl, scena
     command: 'stop',
   }, context);
   commands.push(stop);
-
-  if (enableWs && collector) {
-    await collector.settle(1200);
-  }
-
-  if (!sessionInfo) {
-    const shellOpen = shellRecords
-      .slice(shellStartIndex)
-      .find((record) => record.kind === 'open' && typeof record.url === 'string' && record.url.includes('session_id='));
-    if (shellOpen) {
-      sessionInfo = parseOpenUrl(shellOpen.url);
-    }
-  }
-
-  let artifact = null;
-  if (sessionInfo?.sessionId) {
-    const response = await fetch(`${BACKEND_URL}/api/session-artifacts/${sessionInfo.sessionId}`);
-    if (response.ok) {
-      artifact = await response.json();
-    }
-  }
-
-  return {
-    scenario,
-    sessionId,
-    prompt,
-    promptSteered: promptOutput.message.tools?.lumon_browser === true && promptOutput.message.tools?.webfetch === false,
-    promptTools: promptOutput.message.tools,
-    sessionInfo,
-    commands,
-    artifact,
-    shellStartIndex,
-    shellEndIndex: shellRecords.length,
-  };
+  return await finalizeTask();
 }
 
 function commandKey(record) {
   return `${record.command}:${record.command_id}`;
+}
+
+function findBlockedCheckpoint(task) {
+  if (!task || !Array.isArray(task.commands)) {
+    return null;
+  }
+  for (const item of task.commands) {
+    if (item?.result?.status === 'blocked' && item?.result?.checkpoint_id) {
+      return item.result.checkpoint_id;
+    }
+  }
+  return null;
+}
+
+async function executeWithBusyRetry(plugin, args, context, retries = 4, delayMs = 400) {
+  let lastResult = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const executed = await executeTool(plugin, args, context);
+    lastResult = executed;
+    const isBusy =
+      executed?.result?.status === 'blocked' &&
+      executed?.result?.reason === 'busy';
+    if (!isBusy || attempt === retries) {
+      return executed;
+    }
+    await sleep(delayMs);
+  }
+  return lastResult;
+}
+
+async function waitForAutoResumePrompt(clientLogs, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const latest = clientLogs.find((entry) => {
+      const message = String(entry?.message || '');
+      return (
+        message.includes('[lumon] auto_resume_prompt') ||
+        message.includes('[lumon] auto_resume_prompt_error')
+      );
+    });
+    if (latest) {
+      return latest;
+    }
+    await sleep(250);
+  }
+  return null;
 }
 
 function assertCondition(assertions, condition, code, detail) {
@@ -560,8 +703,93 @@ async function runStaleTabScenario(sessionInfo) {
   });
 }
 
+async function runTakeoverAutoResumeScenario({
+  plugin,
+  shellRecords,
+  clientLogs,
+  promptAsyncCalls,
+  sessionId,
+  collectorRef,
+  enableWs,
+  requireDirectTakeover = false,
+}) {
+  const prompt =
+    'Open the local approval page, click submit, then wait for manual verification before continuing.';
+  const task = await runTask({
+    plugin,
+    shellRecords,
+    sessionId,
+    prompt,
+    openUrl: LOCAL_APPROVAL_URL,
+    scenario: 'takeover_auto_resume',
+    enableWs,
+    collectorRef,
+    autoApproveBlocked: false,
+    stopAfterClick: true,
+  });
+
+  const checkpointId = findBlockedCheckpoint(task);
+
+  if (!enableWs || !collectorRef?.collector || !checkpointId) {
+    return {
+      skipped: true,
+      reason: !enableWs ? 'websocket_disabled' : !collectorRef?.collector ? 'session_info_missing' : 'checkpoint_missing',
+      task,
+      autoResumeLog: null,
+      promptAsyncCount: Array.isArray(promptAsyncCalls) ? promptAsyncCalls.length : 0,
+    };
+  }
+
+  const collector = collectorRef.collector;
+  collector.send({
+    type: 'start_takeover',
+    payload: {
+      mode_preference: requireDirectTakeover ? 'direct' : 'remote',
+    },
+  });
+  await collector.settle(500);
+  const takeoverStatus = await executeWithBusyRetry(
+    plugin,
+    {
+      command_id: `cmd_status_takeover_mode_${sessionId}`,
+      command: 'status',
+    },
+    { sessionID: sessionId, directory: ROOT, metadata: () => {} },
+    6,
+    450,
+  );
+  collector.send({ type: 'end_takeover', payload: {} });
+  await collector.settle(1200);
+  collector.send({ type: 'approve', payload: { checkpoint_id: checkpointId } });
+  await collector.settle(800);
+
+  const autoResumeLog = await waitForAutoResumePrompt(clientLogs, 12000);
+  const postResumeStatus = await executeWithBusyRetry(
+    plugin,
+    {
+      command_id: `cmd_status_takeover_${sessionId}`,
+      command: 'status',
+    },
+    { sessionID: sessionId, directory: ROOT, metadata: () => {} },
+    6,
+    450,
+  );
+
+  return {
+    skipped: false,
+    task,
+    autoResumeLog,
+    takeoverStatus,
+    wsMessages: collector.messages,
+    postResumeStatus,
+    promptAsyncCount: Array.isArray(promptAsyncCalls) ? promptAsyncCalls.length : 0,
+    promptAsyncCalls: Array.isArray(promptAsyncCalls) ? promptAsyncCalls : [],
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  ensureHarnessDependencies();
   if (args.restart) {
     restartServices();
   }
@@ -571,12 +799,12 @@ async function main() {
   const outputDir = args.outputDir || path.join(OUTPUT_DIR, `opencode_reliability_${stamp()}`);
   await mkdir(outputDir, { recursive: true });
 
-  const { plugin, shellRecords, clientLogs } = await createPluginHarness();
+  const { plugin, shellRecords, clientLogs, promptAsyncCalls } = await createPluginHarness();
   const results = [];
   const collectorRef = { collector: null };
   const selectedScenarios = new Set(
     args.scenario === 'all'
-      ? ['external', 'local', 'approval', 'second-task', 'reconnect', 'stale-tab']
+      ? ['external', 'local', 'approval', 'takeover-auto-resume', 'second-task', 'reconnect', 'stale-tab']
       : args.scenario.split(',').map((value) => value.trim()).filter(Boolean),
   );
 
@@ -626,6 +854,23 @@ async function main() {
       enableWs: args.enableWs,
     });
     results.push(approvalTask);
+  }
+
+  let takeoverAutoResume = { skipped: true, reason: 'scenario_disabled' };
+  if (selectedScenarios.has('takeover-auto-resume')) {
+    takeoverAutoResume = await runTakeoverAutoResumeScenario({
+      plugin,
+      shellRecords,
+      clientLogs,
+      promptAsyncCalls,
+      sessionId: makeHarnessSessionId('takeover_resume'),
+      collectorRef: { collector: null },
+      enableWs: args.enableWs,
+      requireDirectTakeover: args.requireDirectTakeover,
+    });
+    if (takeoverAutoResume?.task) {
+      results.push(takeoverAutoResume.task);
+    }
   }
 
   if (selectedScenarios.has('second-task')) {
@@ -704,6 +949,72 @@ async function main() {
       { messages: reconnectReplayCollector.messages },
     );
   }
+  if (args.enableWs && selectedScenarios.has('takeover-auto-resume')) {
+    assertCondition(
+      assertions,
+      !takeoverAutoResume.skipped,
+      'takeover_auto_resume_executed',
+      takeoverAutoResume,
+    );
+    const wsMessages = Array.isArray(takeoverAutoResume.wsMessages)
+      ? takeoverAutoResume.wsMessages
+      : [];
+    const sawTakeoverState = wsMessages.some(
+      (entry) => entry?.payload?.type === 'session_state' && entry?.payload?.payload?.state === 'takeover',
+    );
+    const sawRunningState = wsMessages.some(
+      (entry) => entry?.payload?.type === 'session_state' && entry?.payload?.payload?.state === 'running',
+    );
+    assertCondition(assertions, sawTakeoverState, 'takeover_state_seen', { wsMessages });
+    assertCondition(assertions, sawRunningState, 'takeover_returned_running_seen', { wsMessages });
+    assertCondition(
+      assertions,
+      String(takeoverAutoResume.autoResumeLog?.message || '').includes('auto_resume_prompt'),
+      'auto_resume_prompt_logged',
+      takeoverAutoResume.autoResumeLog,
+    );
+    assertCondition(
+      assertions,
+      Number(takeoverAutoResume.promptAsyncCount || 0) >= 1,
+      'auto_resume_prompt_async_called',
+      {
+        promptAsyncCount: takeoverAutoResume.promptAsyncCount,
+        promptAsyncCalls: takeoverAutoResume.promptAsyncCalls,
+      },
+    );
+    const statusResult = takeoverAutoResume.postResumeStatus?.result || {};
+    assertCondition(
+      assertions,
+      statusResult.command === 'status' && ['success', 'partial'].includes(statusResult.status),
+      'post_resume_status_command_runs',
+      statusResult,
+    );
+    const takeoverStatusResult = takeoverAutoResume.takeoverStatus?.result || {};
+    const takeoverMode = takeoverStatusResult?.meta?.takeover_mode || null;
+    const takeoverUrl = takeoverStatusResult?.meta?.takeover_url || null;
+    assertCondition(
+      assertions,
+      typeof takeoverMode === 'string' && ['remote', 'direct'].includes(takeoverMode),
+      'takeover_mode_reported',
+      takeoverStatusResult,
+    );
+    if (args.requireDirectTakeover) {
+      assertCondition(
+        assertions,
+        takeoverMode === 'direct',
+        'direct_takeover_mode_enabled',
+        takeoverStatusResult,
+      );
+    }
+    if (takeoverMode === 'direct') {
+      assertCondition(
+        assertions,
+        typeof takeoverUrl === 'string' && takeoverUrl.length > 0,
+        'direct_takeover_url_reported',
+        takeoverStatusResult,
+      );
+    }
+  }
 
   const bundle = {
     generatedAt: new Date().toISOString(),
@@ -714,7 +1025,9 @@ async function main() {
     results,
     shellRecords,
     clientLogs,
+    promptAsyncCalls,
     wsMessages,
+    takeoverAutoResume,
     staleTab,
     assertions,
   };
