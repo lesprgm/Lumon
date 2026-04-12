@@ -114,6 +114,29 @@ async def test_type_text_masks_values() -> None:
 
 
 @pytest.mark.asyncio
+async def test_type_text_infers_target_rect_when_box_missing() -> None:
+    events: list[dict] = []
+    page = FakePage()
+    page.locators["#input"] = FakeLocator(None)
+    layer = BrowserActionLayer(
+        session_id="sess_1",
+        adapter_id="playwright_native",
+        adapter_run_id="run_1",
+        page=page,
+        emit_event=lambda payload: _append(events, payload),
+        emit_worker_update=lambda payload: _append([], payload),
+        event_seq_supplier=iter(range(1, 100)).__next__,
+        gate_check=lambda: asyncio.sleep(0),
+    )
+
+    await layer.type_text("#input", "secret-value", "Typing input", "Fill secure field")
+
+    assert events[0]["target_rect"] == {"x": 850, "y": 520, "width": 220, "height": 40}
+    assert events[0]["meta"]["fallback_cursor"] is True
+    assert events[0]["meta"]["inferred_target_rect"] is True
+
+
+@pytest.mark.asyncio
 async def test_click_falls_back_when_target_box_missing() -> None:
     events: list[dict] = []
     page = FakePage()

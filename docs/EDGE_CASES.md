@@ -215,3 +215,19 @@ Mitigation:
 
 Still weak:
 - developers can still confuse partial live artifacts with finalized bundles if they inspect `output/sessions/` too early
+
+### 22. Stale websocket events from an old adapter run mutate the current UI
+Status: covered
+
+Mitigation:
+- frontend now derives `adapter_run_id` from server envelopes and drops stale non-session
+  messages when they do not match the currently active run id
+- stale drops emit lightweight `ui_telemetry` metadata for debugging and trend tracking
+
+### 23. Remote takeover re-entry shows a blank stage after direct takeover return
+Status: covered
+
+Mitigation:
+- backend takeover transitions now force fresh snapshot/context emission on remote
+  takeover entry and remote return-control paths so Lumon stage always has immediate
+  visual evidence

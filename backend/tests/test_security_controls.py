@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from fastapi import WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 from fastapi.websockets import WebSocketState
@@ -20,6 +19,7 @@ class FakeWebSocket:
         self.headers = {"origin": origin}
         self.application_state = WebSocketState.CONNECTED
         self.accepted = False
+        self.closed: tuple[int, str] | None = None
         self.sent: list[dict] = []
 
     async def accept(self) -> None:
@@ -27,6 +27,9 @@ class FakeWebSocket:
 
     async def send_json(self, payload: dict) -> None:
         self.sent.append(payload)
+
+    async def close(self, code: int, reason: str) -> None:
+        self.closed = (code, reason)
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +46,11 @@ def test_create_app_disables_docs_and_uses_explicit_cors() -> None:
     assert "/docs" not in route_paths
     assert "/openapi.json" not in route_paths
 
-    cors = next(middleware for middleware in app.user_middleware if middleware.cls is CORSMiddleware)
+    cors = next(
+        middleware
+        for middleware in app.user_middleware
+        if middleware.cls is CORSMiddleware
+    )
     assert cors.kwargs["allow_origins"]
     assert cors.kwargs["allow_origins"] != ["*"]
     assert cors.kwargs["allow_credentials"] is False
@@ -52,10 +59,14 @@ def test_create_app_disables_docs_and_uses_explicit_cors() -> None:
 def test_bootstrap_requires_allowed_origin_and_returns_no_store() -> None:
     app = create_app()
     with TestClient(app) as client:
-        rejected = client.get("/api/bootstrap", headers={"Origin": "http://evil.example"})
+        rejected = client.get(
+            "/api/bootstrap", headers={"Origin": "http://evil.example"}
+        )
         assert rejected.status_code == 403
 
-        accepted = client.get("/api/bootstrap", headers={"Origin": "http://127.0.0.1:8000"})
+        accepted = client.get(
+            "/api/bootstrap", headers={"Origin": "http://127.0.0.1:8000"}
+        )
         assert accepted.status_code == 200
         payload = accepted.json()
         assert payload["session_id"].startswith("sess_")
@@ -85,30 +96,62 @@ def test_backend_serves_built_frontend_shell() -> None:
         ready = client.get("/__lumon_frontend_ready__")
 
     assert root.status_code == 200
-    assert "id=\"root\"" in root.text or "id='root'" in root.text
+    assert 'id="root"' in root.text or "id='root'" in root.text
     assert ready.status_code == 200
     assert ready.json()["frontend"] == "static"
 
 
-def test_local_approval_endpoints_are_local_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backend_rejects_stale_frontend_shell_at_root_and_catchall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "RUNTIME_VERSION", "stale-runtime-for-test")
+    app = create_app()
+    with TestClient(app) as client:
+        root = client.get("/")
+        catchall = client.get("/landing")
+
+    assert root.status_code == 503
+    assert "frontend build is stale" in root.json()["detail"]
+    assert catchall.status_code == 503
+    assert "frontend build is stale" in catchall.json()["detail"]
+
+
+def test_local_approval_endpoints_are_local_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import app.session.manager as session_manager
 
-    async def fake_resolve(self, session_id: str, checkpoint_id: str, *, approve: bool) -> dict:
+    async def fake_resolve(
+        self, session_id: str, checkpoint_id: str, *, approve: bool
+    ) -> dict:
         return {
             "artifact": {
                 "session_id": session_id,
-                "interventions": [{"checkpoint_id": checkpoint_id, "resolution": "approved" if approve else "denied"}],
+                "interventions": [
+                    {
+                        "checkpoint_id": checkpoint_id,
+                        "resolution": "approved" if approve else "denied",
+                    }
+                ],
             },
             "events": [],
             "commands": [],
         }
 
-    monkeypatch.setattr(session_manager.SessionManager, "resolve_local_checkpoint", fake_resolve)
+    monkeypatch.setattr(
+        session_manager.SessionManager, "resolve_local_checkpoint", fake_resolve
+    )
     app = create_app()
 
     with TestClient(app) as client:
-        approve = client.post("/api/local/session/sess_test/approve", json={"checkpoint_id": "chk_1"})
-        reject = client.post("/api/local/session/sess_test/reject", json={"checkpoint_id": "chk_1"})
+        approve = client.post(
+            "/api/local/session/sess_test/approve", json={"checkpoint_id": "chk_1"}
+        )
+        reject = client.post(
+            "/api/local/session/sess_test/reject", json={"checkpoint_id": "chk_1"}
+        )
 
     assert approve.status_code == 200
     assert approve.json()["artifact"]["interventions"][0]["resolution"] == "approved"
@@ -116,7 +159,82 @@ def test_local_approval_endpoints_are_local_only(monkeypatch: pytest.MonkeyPatch
     assert reject.json()["artifact"]["interventions"][0]["resolution"] == "denied"
 
 
-def test_local_observe_endpoint_is_local_only_and_reuses_session(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_consume_resume_intent_endpoint_is_local_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.session.manager as session_manager
+
+    def fake_read(
+        self, session_id: str, *, after_seq: int = 0, consume: bool = False
+    ) -> dict:
+        return {
+            "session_id": session_id,
+            "pending": not consume,
+            "resume_intent_seq": after_seq + 1,
+            "reason": "takeover_returned_control",
+        }
+
+    monkeypatch.setattr(
+        session_manager.SessionManager,
+        "read_local_resume_intent",
+        fake_read,
+    )
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/local/session/sess_test/consume-resume-intent",
+            json={"after_seq": 2},
+        )
+        consumed = client.post(
+            "/api/local/session/sess_test/consume-resume-intent",
+            json={"after_seq": 2, "consume": True},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pending"] is True
+    assert payload["resume_intent_seq"] == 3
+    assert consumed.status_code == 200
+    consumed_payload = consumed.json()
+    assert consumed_payload["pending"] is False
+
+
+def test_local_ack_resume_intent_endpoint_is_local_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.session.manager as session_manager
+
+    def fake_ack(self, session_id: str, *, resume_intent_seq: int) -> dict:
+        return {
+            "session_id": session_id,
+            "resume_intent_seq": resume_intent_seq,
+            "consumed_seq": resume_intent_seq,
+            "acknowledged": True,
+        }
+
+    monkeypatch.setattr(
+        session_manager.SessionManager,
+        "acknowledge_local_resume_intent",
+        fake_ack,
+    )
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/local/session/sess_test/ack-resume-intent",
+            json={"resume_intent_seq": 7},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["acknowledged"] is True
+    assert payload["consumed_seq"] == 7
+
+
+def test_local_observe_endpoint_is_local_only_and_reuses_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import app.session.manager as session_manager
 
     class FakeConnector:
@@ -144,7 +262,15 @@ def test_local_observe_endpoint_is_local_only_and_reuses_session(monkeypatch: py
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, auto_delegate, observer_mode, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                auto_delegate,
+                observer_mode,
+                bridge_context,
+            )
             self.observed_session_id = observed_session_id
             self.runtime.adapter_run_id = self.adapter_run_id
             self.runtime.state = SessionState.RUNNING
@@ -155,11 +281,16 @@ def test_local_observe_endpoint_is_local_only_and_reuses_session(monkeypatch: py
         async def reject(self, checkpoint_id: str) -> None: ...
         async def accept_bridge(self) -> None: ...
         async def decline_bridge(self) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     app = create_app()
     with TestClient(app) as client:
         first = client.post(
@@ -186,7 +317,9 @@ def test_local_observe_endpoint_is_local_only_and_reuses_session(monkeypatch: py
         assert first.json()["session_id"] == second.json()["session_id"]
 
 
-def test_local_browser_command_endpoint_is_local_only_and_returns_verified_result(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_browser_command_endpoint_is_local_only_and_returns_verified_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import app.session.manager as session_manager
 
     class FakeConnector:
@@ -215,12 +348,22 @@ def test_local_browser_command_endpoint_is_local_only_and_returns_verified_resul
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, auto_delegate, observer_mode, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                auto_delegate,
+                observer_mode,
+                bridge_context,
+            )
             self.observed_session_id = observed_session_id
             self.runtime.adapter_run_id = self.adapter_run_id
             self.runtime.state = SessionState.RUNNING
 
-        async def ensure_browser_delegate(self, *, observed_session_id: str, task_text: str) -> None:
+        async def ensure_browser_delegate(
+            self, *, observed_session_id: str, task_text: str
+        ) -> None:
             _ = task_text
             self.ensure_delegate_calls += 1
             self.observed_session_id = observed_session_id
@@ -256,11 +399,16 @@ def test_local_browser_command_endpoint_is_local_only_and_returns_verified_resul
         async def reject(self, checkpoint_id: str) -> None: ...
         async def accept_bridge(self) -> None: ...
         async def decline_bridge(self) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(session_manager, "create_connector", lambda runtime, adapter_id: FakeConnector(runtime))
+    monkeypatch.setattr(
+        session_manager,
+        "create_connector",
+        lambda runtime, adapter_id: FakeConnector(runtime),
+    )
     app = create_app()
     with TestClient(app) as client:
         response = client.post(
@@ -285,23 +433,24 @@ async def test_manager_rejects_invalid_origin_and_invalid_token() -> None:
     manager = SessionManager(allowed_origins=("http://127.0.0.1:5173",))
     session = manager.create_session()
 
-    with pytest.raises(WebSocketException):
-        await manager.connect(
-            FakeWebSocket(
-                session_id=session["session_id"],
-                token=session["ws_token"],
-                origin="http://evil.example",
-            )
-        )
+    invalid_origin = FakeWebSocket(
+        session_id=session["session_id"],
+        token=session["ws_token"],
+        origin="http://evil.example",
+    )
+    invalid_token = FakeWebSocket(
+        session_id=session["session_id"],
+        token="ws_wrong",
+        origin="http://127.0.0.1:5173",
+    )
 
-    with pytest.raises(WebSocketException):
-        await manager.connect(
-            FakeWebSocket(
-                session_id=session["session_id"],
-                token="ws_wrong",
-                origin="http://127.0.0.1:5173",
-            )
-        )
+    await manager.connect(invalid_origin)
+    await manager.connect(invalid_token)
+
+    assert invalid_origin.accepted is True
+    assert invalid_origin.closed == (1008, "WebSocket origin not allowed")
+    assert invalid_token.accepted is True
+    assert invalid_token.closed == (1008, "Invalid session credentials")
 
 
 @pytest.mark.asyncio

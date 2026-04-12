@@ -49,6 +49,9 @@ async def test_takeover_invalidates_waiting_checkpoint_and_resumes_running() -> 
     await connector.end_takeover()
 
     assert runtime.state == SessionState.RUNNING
+    resume_intent = runtime.consume_resume_intent()
+    assert resume_intent["pending"] is True
+    assert resume_intent["reason"] == "takeover_returned_control"
     assert any(
         message["type"] == "error"
         and message["payload"]["code"] == "CHECKPOINT_STALE"
@@ -71,6 +74,425 @@ async def test_takeover_from_paused_restores_paused_state() -> None:
     await connector.end_takeover()
 
     assert runtime.state == SessionState.PAUSED
+    resume_intent = runtime.consume_resume_intent()
+    assert resume_intent["pending"] is False
+
+
+@pytest.mark.asyncio
+async def test_direct_takeover_focuses_real_browser_window_and_tracks_url() -> None:
+    runtime = SessionRuntime()
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    runtime.state = SessionState.RUNNING
+    connector._headless = False
+    connector.takeover_mode = "direct"
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "https://www.wikipedia.org/wiki/OpenAI"
+            self.focus_calls = 0
+            self._event_handlers: dict[str, list] = {}
+
+        async def bring_to_front(self) -> None:
+            self.focus_calls += 1
+
+        async def screenshot(self, *, type: str = "png", **kwargs):
+            _ = type
+            _ = kwargs
+            return b"png"
+
+        def on(self, event: str, handler) -> None:
+            self._event_handlers.setdefault(event, []).append(handler)
+
+    fake_page = FakePage()
+    connector.page = fake_page  # type: ignore[assignment]
+
+    await connector.start_takeover()
+
+    assert runtime.state == SessionState.TAKEOVER
+    assert fake_page.focus_calls == 1
+    assert connector.takeover_url == "https://www.wikipedia.org/wiki/OpenAI"
+
+    await connector.end_takeover()
+
+    assert runtime.state == SessionState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_status_metadata_reports_takeover_mode_and_url() -> None:
+    runtime = SessionRuntime()
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    connector.takeover_mode = "direct"
+    connector.takeover_url = "https://www.wikipedia.org/wiki/OpenAI"
+    connector._capture_command_frame = _capture_command_frame_true  # type: ignore[assignment]
+    connector._browser_status_context = _status_context_factory(
+        "https://www.wikipedia.org/wiki/OpenAI",
+        "OpenAI - Wikipedia",
+        "www.wikipedia.org",
+    )  # type: ignore[assignment]
+
+    result = await connector._execute_browser_command(
+        BrowserCommandRequest(
+            project_directory="/repo",
+            observed_session_id="sess_observed_1",
+            command_id="cmd_status_takeover",
+            command="status",
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["meta"]["takeover_mode"] == "direct"
+    assert result["meta"]["takeover_url"] == "https://www.wikipedia.org/wiki/OpenAI"
+
+
+@pytest.mark.asyncio
+async def test_direct_takeover_hud_esc_invokes_end_takeover() -> None:
+    runtime = SessionRuntime()
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    runtime.state = SessionState.RUNNING
+    connector._headless = False
+    connector.takeover_mode = "direct"
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "https://www.wikipedia.org/wiki/OpenAI"
+            self.scripts: list[str] = []
+            self.bound_names: list[str] = []
+            self.focus_calls = 0
+
+        async def expose_binding(self, name: str, callback) -> None:
+            _ = callback
+            self.bound_names.append(name)
+
+        async def evaluate(self, script: str) -> None:
+            self.scripts.append(script)
+
+        async def bring_to_front(self) -> None:
+            self.focus_calls += 1
+
+    fake_page = FakePage()
+    connector.page = fake_page  # type: ignore[assignment]
+
+    await connector.start_takeover()
+
+    assert runtime.state == SessionState.TAKEOVER
+    assert "__lumonEndTakeover" in fake_page.bound_names
+    assert any("__lumonTakeoverEscHandler" in script for script in fake_page.scripts)
+
+    await connector.end_takeover()
+
+    assert runtime.state == SessionState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_direct_takeover_hud_refreshes_only_for_main_frame_navigation() -> None:
+    runtime = SessionRuntime()
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    connector._headless = False
+    connector.takeover_mode = "direct"
+    runtime.state = SessionState.TAKEOVER
+
+    refresh_calls: list[str] = []
+
+    async def fake_install_hud() -> None:
+        refresh_calls.append("install")
+
+    connector._install_direct_takeover_hud = fake_install_hud  # type: ignore[assignment]
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "https://www.wikipedia.org/wiki/OpenAI"
+            self.main_frame = object()
+
+    page = FakePage()
+    connector.page = page  # type: ignore[assignment]
+
+    class ChildFrame:
+        def parent_frame(self):
+            return object()
+
+    await connector._handle_page_frame_navigated(page, ChildFrame())  # type: ignore[arg-type]
+    assert refresh_calls == []
+
+    await connector._handle_page_frame_navigated(page, page.main_frame)  # type: ignore[arg-type]
+    assert refresh_calls == ["install"]
+
+
+@pytest.mark.asyncio
+async def test_start_takeover_honors_mode_preference_when_supported() -> None:
+    runtime = SessionRuntime()
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    runtime.state = SessionState.RUNNING
+    connector._headless = False
+    connector.takeover_mode = "remote"
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "https://www.wikipedia.org/wiki/OpenAI"
+            self.focus_calls = 0
+
+        async def expose_binding(self, name: str, callback) -> None:
+            _ = (name, callback)
+
+        async def evaluate(self, script: str) -> None:
+            _ = script
+
+        async def bring_to_front(self) -> None:
+            self.focus_calls += 1
+
+    connector.page = FakePage()  # type: ignore[assignment]
+
+    await connector.start_takeover(mode_preference="direct")
+
+    assert runtime.state == SessionState.TAKEOVER
+    assert connector.takeover_mode == "direct"
+
+
+@pytest.mark.asyncio
+async def test_start_takeover_direct_mode_relaunches_headed_runtime_when_needed() -> (
+    None
+):
+    runtime = SessionRuntime()
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    runtime.state = SessionState.RUNNING
+    connector._headless = True
+    connector.takeover_mode = "remote"
+    connector.current_page_url = "https://www.wikipedia.org/wiki/OpenAI"
+
+    launch_modes: list[bool] = []
+    launch_urls: list[str | None] = []
+    shutdown_count = 0
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "about:blank"
+            self.gotos: list[str] = []
+            self.focus_calls = 0
+
+        async def goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
+            _ = wait_until
+            self.url = url
+            self.gotos.append(url)
+
+        async def bring_to_front(self) -> None:
+            self.focus_calls += 1
+
+        async def expose_binding(self, name: str, callback) -> None:
+            _ = (name, callback)
+
+        async def evaluate(self, script: str) -> None:
+            _ = script
+
+    async def fake_shutdown_browser(*, stop_playwright: bool = True) -> None:
+        nonlocal shutdown_count
+        _ = stop_playwright
+        shutdown_count += 1
+        connector.playwright = None
+        connector.browser = None
+        connector.context = None
+        connector.page = None
+        connector.action_layer = None
+
+    async def fake_launch_browser(*, headless_override: bool | None = None) -> None:
+        launch_modes.append(bool(headless_override))
+        connector._headless = bool(headless_override)
+        connector.playwright = object()  # type: ignore[assignment]
+        connector.browser = object()  # type: ignore[assignment]
+        connector.context = object()  # type: ignore[assignment]
+        connector.page = FakePage()  # type: ignore[assignment]
+        connector.action_layer = object()  # type: ignore[assignment]
+        connector.takeover_mode = "remote" if connector._headless else "direct"
+        connector.capabilities["supports_direct_takeover"] = not connector._headless
+
+    async def fake_start_stream_transport() -> None:
+        if connector.page is None:
+            launch_urls.append(None)
+            return
+        launch_urls.append(str(getattr(connector.page, "url", None)))
+
+    connector._close_browser_runtime = fake_shutdown_browser  # type: ignore[assignment]
+    connector._shutdown_browser = (  # type: ignore[assignment]
+        lambda: fake_shutdown_browser(stop_playwright=True)
+    )
+    connector._launch_browser = fake_launch_browser  # type: ignore[assignment]
+    connector._start_stream_transport = fake_start_stream_transport  # type: ignore[assignment]
+
+    connector.playwright = object()  # type: ignore[assignment]
+    connector.browser = object()  # type: ignore[assignment]
+    connector.context = object()  # type: ignore[assignment]
+    connector.page = FakePage()  # type: ignore[assignment]
+    connector.action_layer = object()  # type: ignore[assignment]
+
+    await connector.start_takeover(mode_preference="direct")
+
+    assert runtime.state == SessionState.TAKEOVER
+    assert connector.takeover_mode == "direct"
+    assert launch_modes == [False]
+    assert shutdown_count == 1
+    assert connector.page is not None
+    assert (
+        getattr(connector.page, "gotos", [])[0]
+        == "https://www.wikipedia.org/wiki/OpenAI"
+    )
+    assert launch_urls == []
+
+
+@pytest.mark.asyncio
+async def test_end_takeover_direct_mode_relaunches_headless_runtime_and_restores_url() -> (
+    None
+):
+    runtime = SessionRuntime()
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    runtime.state = SessionState.TAKEOVER
+    connector._headless = False
+    connector.takeover_mode = "direct"
+    connector.takeover_url = "https://www.wikipedia.org/wiki/OpenAI"
+    connector.current_page_url = "https://www.wikipedia.org/wiki/OpenAI"
+    connector.resume_state_after_takeover = SessionState.RUNNING
+
+    launch_modes: list[bool] = []
+    launch_urls: list[str | None] = []
+    shutdown_count = 0
+    resume_reasons: list[str] = []
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "about:blank"
+            self.gotos: list[str] = []
+
+        async def goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
+            _ = wait_until
+            self.url = url
+            self.gotos.append(url)
+
+        async def expose_binding(self, name: str, callback) -> None:
+            _ = (name, callback)
+
+        async def evaluate(self, script: str):
+            _ = script
+            return {
+                "innerWidth": 1280,
+                "innerHeight": 800,
+                "outerWidth": 1280,
+                "outerHeight": 800,
+                "dpr": 2,
+                "scale": 1,
+                "viewportWidth": 1280,
+                "viewportHeight": 800,
+                "scrollX": 0,
+                "scrollY": 0,
+            }
+
+        async def screenshot(self, *, type: str = "png", **kwargs):
+            _ = type
+            _ = kwargs
+            return b"png"
+
+    async def fake_close_browser_runtime(*, stop_playwright: bool = False) -> None:
+        _ = stop_playwright
+        nonlocal shutdown_count
+        shutdown_count += 1
+        connector.playwright = None
+        connector.browser = None
+        connector.context = None
+        connector.page = None
+        connector.action_layer = None
+
+    async def fake_launch_browser(*, headless_override: bool | None = None) -> None:
+        launch_modes.append(bool(headless_override))
+        connector._headless = bool(headless_override)
+        connector.playwright = object()  # type: ignore[assignment]
+        connector.browser = object()  # type: ignore[assignment]
+        connector.context = object()  # type: ignore[assignment]
+        connector.page = FakePage()  # type: ignore[assignment]
+        connector.action_layer = object()  # type: ignore[assignment]
+        connector.takeover_mode = "remote" if connector._headless else "direct"
+        connector.capabilities["supports_direct_takeover"] = True
+
+    async def fake_start_stream_transport() -> None:
+        if connector.page is None:
+            launch_urls.append(None)
+            return
+        launch_urls.append(str(getattr(connector.page, "url", None)))
+
+    async def fake_remove_hud() -> None:
+        return None
+
+    async def fake_sync_page_version(*, force: bool) -> bool:
+        _ = force
+        connector.current_page_url = str(getattr(connector.page, "url", "") or "")
+        return False
+
+    def fake_request_resume_intent(*, reason: str) -> None:
+        resume_reasons.append(reason)
+
+    connector._close_browser_runtime = fake_close_browser_runtime  # type: ignore[assignment]
+    connector._launch_browser = fake_launch_browser  # type: ignore[assignment]
+    connector._start_stream_transport = fake_start_stream_transport  # type: ignore[assignment]
+    connector._emit_snapshot_frame = _async_true  # type: ignore[assignment]
+    connector._remove_direct_takeover_hud = fake_remove_hud  # type: ignore[assignment]
+    connector._sync_page_version = fake_sync_page_version  # type: ignore[assignment]
+    runtime.request_resume_intent = fake_request_resume_intent  # type: ignore[assignment]
+
+    await connector.end_takeover()
+
+    assert runtime.state == SessionState.RUNNING
+    assert connector._headless is True
+    assert connector.takeover_mode == "remote"
+    assert shutdown_count == 1
+    assert launch_modes == [True]
+    assert launch_urls == ["about:blank"]
+    assert connector.page is not None
+    assert (
+        getattr(connector.page, "gotos", [])[0]
+        == "https://www.wikipedia.org/wiki/OpenAI"
+    )
+    assert resume_reasons == ["takeover_returned_control"]
+
+
+@pytest.mark.asyncio
+async def test_end_takeover_remote_emits_context_and_snapshot_when_feed_is_empty() -> (
+    None
+):
+    runtime = SessionRuntime()
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    runtime.state = SessionState.TAKEOVER
+    connector._headless = True
+    connector.takeover_mode = "remote"
+    connector.current_page_url = "https://en.wikipedia.org/wiki/AI_agent"
+    connector.resume_state_after_takeover = SessionState.RUNNING
+
+    snapshot_calls: list[bool] = []
+
+    class FakePage:
+        url = "https://en.wikipedia.org/wiki/AI_agent"
+
+    async def fake_emit_snapshot_frame(*, command_snapshot: bool = False) -> bool:
+        snapshot_calls.append(command_snapshot)
+        return True
+
+    async def fake_sync_page_version(*, force: bool) -> bool:
+        _ = force
+        connector.current_page_url = "https://en.wikipedia.org/wiki/AI_agent"
+        return False
+
+    connector.page = FakePage()  # type: ignore[assignment]
+    connector._emit_snapshot_frame = fake_emit_snapshot_frame  # type: ignore[assignment]
+    connector._sync_page_version = fake_sync_page_version  # type: ignore[assignment]
+
+    assert runtime.latest_frame_payload is None
+
+    await connector.end_takeover()
+
+    assert runtime.state == SessionState.RUNNING
+    assert snapshot_calls == [False]
 
 
 @pytest.mark.asyncio
@@ -424,8 +846,13 @@ async def test_command_delegate_marks_ready_before_stream_transport_finishes() -
     transport_started = asyncio.Event()
     allow_transport_finish = asyncio.Event()
 
-    async def fake_launch_browser() -> None:
-        return None
+    async def fake_launch_browser(*, headless_override: bool | None = None) -> None:
+        _ = headless_override
+        connector.playwright = object()  # type: ignore[assignment]
+        connector.browser = object()  # type: ignore[assignment]
+        connector.context = object()  # type: ignore[assignment]
+        connector.page = object()  # type: ignore[assignment]
+        connector.action_layer = object()  # type: ignore[assignment]
 
     async def fake_start_stream_transport() -> None:
         transport_started.set()
@@ -447,6 +874,45 @@ async def test_command_delegate_marks_ready_before_stream_transport_finishes() -
     allow_transport_finish.set()
     connector.command_stop_event.set()
     await asyncio.wait_for(delegate_task, timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_command_delegate_launches_headless_for_lumon_first_startup() -> None:
+    runtime = SessionRuntime()
+    runtime.state = SessionState.STARTING
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    connector.command_mode = True
+
+    launch_modes: list[bool] = []
+    transport_started = asyncio.Event()
+
+    async def fake_launch_browser(*, headless_override: bool | None = None) -> None:
+        launch_modes.append(bool(headless_override))
+        connector._headless = bool(headless_override)
+        connector.browser = object()  # type: ignore[assignment]
+        connector.context = object()  # type: ignore[assignment]
+        connector.page = object()  # type: ignore[assignment]
+        connector.action_layer = object()  # type: ignore[assignment]
+
+    async def fake_start_stream_transport() -> None:
+        transport_started.set()
+
+    async def fake_shutdown_browser() -> None:
+        return None
+
+    connector._launch_browser = fake_launch_browser  # type: ignore[assignment]
+    connector._start_stream_transport = fake_start_stream_transport  # type: ignore[assignment]
+    connector._shutdown_browser = fake_shutdown_browser  # type: ignore[assignment]
+
+    delegate_task = asyncio.create_task(connector._run_command_delegate())
+    await asyncio.wait_for(connector.command_ready.wait(), timeout=0.2)
+    await asyncio.wait_for(transport_started.wait(), timeout=0.2)
+
+    connector.command_stop_event.set()
+    await asyncio.wait_for(delegate_task, timeout=0.2)
+
+    assert launch_modes == [True]
 
 
 @pytest.mark.asyncio

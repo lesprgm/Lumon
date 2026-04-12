@@ -37,7 +37,9 @@ class FakeRuntime:
         self.frames.append(payload)
         self.latest_frame_generation += 1
         frame_seq = payload.get("frame_seq")
-        self.latest_frame_seq = frame_seq if isinstance(frame_seq, int) else self.latest_frame_seq
+        self.latest_frame_seq = (
+            frame_seq if isinstance(frame_seq, int) else self.latest_frame_seq
+        )
 
     async def emit_background_worker_update(self, payload: dict) -> None: ...
 
@@ -47,7 +49,13 @@ class FakeRuntime:
     async def emit_bridge_offer(self, payload: dict) -> None:
         self.bridge_offers.append(payload)
 
-    async def emit_error(self, code: ErrorCode, message: str, command_type: str | None = None, checkpoint_id: str | None = None) -> None:
+    async def emit_error(
+        self,
+        code: ErrorCode,
+        message: str,
+        command_type: str | None = None,
+        checkpoint_id: str | None = None,
+    ) -> None:
         self.errors.append(
             {
                 "code": code.value,
@@ -60,7 +68,9 @@ class FakeRuntime:
     async def emit_session_state(self) -> None:
         self.session_state_emits += 1
 
-    async def transition_to(self, state: SessionState, checkpoint_id: str | None = None) -> None:
+    async def transition_to(
+        self, state: SessionState, checkpoint_id: str | None = None
+    ) -> None:
         self.state = state
         self.transitions.append(state.value)
 
@@ -74,6 +84,53 @@ class FakeRuntime:
         return "2026-03-10T12:00:00Z"
 
 
+class _AttachRuntimeStub:
+    def __init__(self) -> None:
+        self.session_id = "sess_attach_001"
+        self.join_token = "ws_attach_token"
+        self.task_text = "OpenCode interactive session"
+        self.ensure_calls: list[tuple[str, str | None]] = []
+        self.execute_payloads: list[dict[str, object]] = []
+        self._artifact = SimpleNamespace(metrics=SimpleNamespace(ui_ready_at=None))
+        self._connector = None
+
+    @property
+    def connection_count(self) -> int:
+        return 0
+
+    async def ensure_opencode_browser_delegate(
+        self, *, observed_session_id: str, task_text: str | None = None
+    ) -> None:
+        self.ensure_calls.append((observed_session_id, task_text))
+
+    async def execute_browser_command(self, payload):
+        if hasattr(payload, "model_dump"):
+            dumped = payload.model_dump(mode="json")
+        else:
+            dumped = dict(payload)
+        self.execute_payloads.append(dumped)
+        return {
+            "command_id": str(dumped.get("command_id") or "cmd_stub"),
+            "command": str(dumped.get("command") or "status"),
+            "status": "success",
+            "summary_text": "ok",
+            "reason": None,
+            "source_url": "about:blank",
+            "domain": "unknown",
+            "page_version": 1,
+            "actionable_elements": [],
+            "checkpoint_id": None,
+            "intervention_id": None,
+            "evidence": {
+                "verified": True,
+                "final_url": "about:blank",
+                "domain": "unknown",
+                "page_version": 1,
+            },
+            "meta": {},
+        }
+
+
 @pytest.mark.asyncio
 async def test_opencode_demo_emits_normalized_events() -> None:
     runtime = FakeRuntime()
@@ -84,9 +141,10 @@ async def test_opencode_demo_emits_normalized_events() -> None:
     assert runtime.events
     assert all(event["adapter_id"] == "opencode" for event in runtime.events)
     assert runtime.events[0]["summary_text"] == "OpenCode planning task execution"
-    assert runtime.completed == ("completed", "OpenCode adapter demo completed the requested task flow")
-
-
+    assert runtime.completed == (
+        "completed",
+        "OpenCode adapter demo completed the requested task flow",
+    )
 
 
 def test_bridge_runtime_proxy_exposes_parent_frame_counters() -> None:
@@ -103,7 +161,9 @@ def test_bridge_runtime_proxy_exposes_parent_frame_counters() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bridge_runtime_proxy_transition_to_running_clears_parent_waiting_state() -> None:
+async def test_bridge_runtime_proxy_transition_to_running_clears_parent_waiting_state() -> (
+    None
+):
     runtime = FakeRuntime()
     runtime.state = SessionState.WAITING_FOR_APPROVAL
     connector = OpenCodeConnector(runtime)
@@ -116,7 +176,9 @@ async def test_bridge_runtime_proxy_transition_to_running_clears_parent_waiting_
 
 
 @pytest.mark.asyncio
-async def test_opencode_demo_with_browser_bridge_relabels_child_events(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_demo_with_browser_bridge_relabels_child_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -148,7 +210,13 @@ async def test_opencode_demo_with_browser_bridge_relabels_child_events(monkeypat
         ) -> None:
             _ = (observer_mode, observed_session_id)
             self.runtime.adapter_run_id = self.adapter_run_id
-            await self.runtime.emit_frame({"mime_type": "image/png", "data_base64": "bridge_frame", "frame_seq": 1})
+            await self.runtime.emit_frame(
+                {
+                    "mime_type": "image/png",
+                    "data_base64": "bridge_frame",
+                    "frame_seq": 1,
+                }
+            )
             await self.runtime.emit_agent_event(
                 {
                     "event_seq": 1,
@@ -180,28 +248,47 @@ async def test_opencode_demo_with_browser_bridge_relabels_child_events(monkeypat
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: InstantBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: InstantBridgeConnector(bridge_runtime),
+    )
 
     await connector._run_demo("Search the web for Lumon docs")
 
-    bridge_events = [event for event in runtime.events if event["summary_text"] == "Playwright opened the web page"]
+    bridge_events = [
+        event
+        for event in runtime.events
+        if event["summary_text"] == "Playwright opened the web page"
+    ]
     assert bridge_events
     assert bridge_events[0]["adapter_id"] == "opencode"
     assert bridge_events[0]["meta"]["web_bridge"] == "playwright_native"
     assert bridge_events[0]["meta"]["bridge_source_adapter_id"] == "playwright_native"
-    assert runtime.frames[0] == {"mime_type": "image/png", "data_base64": "bridge_frame", "frame_seq": 1}
+    assert runtime.frames[0] == {
+        "mime_type": "image/png",
+        "data_base64": "bridge_frame",
+        "frame_seq": 1,
+    }
     assert runtime.frames[-1]["mime_type"] == "image/png"
     assert runtime.frames[-1]["data_base64"] == "bridge_frame"
     assert runtime.frames[-1]["frame_seq"] >= 1
-    assert runtime.completed == ("completed", "OpenCode adapter demo completed the requested task flow")
+    assert runtime.completed == (
+        "completed",
+        "OpenCode adapter demo completed the requested task flow",
+    )
 
 
 @pytest.mark.asyncio
-async def test_opencode_bridge_failure_stops_parent_demo_run(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_bridge_failure_stops_parent_demo_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -237,11 +324,17 @@ async def test_opencode_bridge_failure_stops_parent_demo_run(monkeypatch: pytest
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: FailingBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: FailingBridgeConnector(bridge_runtime),
+    )
 
     await connector._run_demo("Search the web for Lumon docs")
 
@@ -249,7 +342,9 @@ async def test_opencode_bridge_failure_stops_parent_demo_run(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_opencode_bridge_controls_delegate_to_active_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_bridge_controls_delegate_to_active_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -294,8 +389,8 @@ async def test_opencode_bridge_controls_delegate_to_active_bridge(monkeypatch: p
         async def reject(self, checkpoint_id: str) -> None:
             delegated.append(("reject", checkpoint_id))
 
-        async def start_takeover(self) -> None:
-            delegated.append(("start_takeover", None))
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            delegated.append(("start_takeover", mode_preference))
 
         async def end_takeover(self) -> None:
             delegated.append(("end_takeover", None))
@@ -303,9 +398,17 @@ async def test_opencode_bridge_controls_delegate_to_active_bridge(monkeypatch: p
         async def stop(self) -> None:
             delegated.append(("stop", None))
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: PersistentBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: PersistentBridgeConnector(bridge_runtime),
+    )
 
-    await connector._launch_web_bridge({"type": "browser.search", "summary": "Search the web"}, "Search the web", demo_mode=False)
+    await connector._launch_web_bridge(
+        {"type": "browser.search", "summary": "Search the web"},
+        "Search the web",
+        demo_mode=False,
+    )
 
     assert connector.capabilities["supports_pause"] is True
     await connector.pause()
@@ -328,7 +431,81 @@ async def test_opencode_bridge_controls_delegate_to_active_bridge(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_opencode_bridge_relabels_approval_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_bridge_forwards_takeover_mode_preference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeRuntime()
+    connector = OpenCodeConnector(runtime)
+    runtime.adapter_run_id = connector.adapter_run_id
+    connector.selected_web_mode = "delegate_playwright"
+    connector.selected_web_bridge = "playwright_native"
+    delegated: list[tuple[str, str | None]] = []
+
+    class PersistentBridgeConnector:
+        adapter_id = "playwright_native"
+        capabilities = {
+            "supports_pause": True,
+            "supports_approval": True,
+            "supports_takeover": True,
+            "supports_frames": True,
+        }
+
+        def __init__(self, bridge_runtime) -> None:
+            self.runtime = bridge_runtime
+
+        async def start_task(
+            self,
+            task_text: str,
+            demo_mode: bool = True,
+            web_mode: str | None = None,
+            web_bridge: str | None = None,
+            observer_mode: bool = False,
+            observed_session_id: str | None = None,
+            bridge_context: dict | None = None,
+        ) -> None:
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
+            await self.runtime.emit_session_state()
+
+        async def pause(self) -> None: ...
+        async def resume(self) -> None: ...
+        async def approve(self, checkpoint_id: str) -> None: ...
+        async def reject(self, checkpoint_id: str) -> None: ...
+
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            delegated.append(("start_takeover", mode_preference))
+
+        async def end_takeover(self) -> None: ...
+        async def stop(self) -> None: ...
+
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: PersistentBridgeConnector(bridge_runtime),
+    )
+
+    await connector._launch_web_bridge(
+        {"type": "browser.search", "summary": "Search the web"},
+        "Search the web",
+        demo_mode=False,
+    )
+
+    await connector.start_takeover(mode_preference="direct")
+
+    assert delegated == [("start_takeover", "direct")]
+
+
+@pytest.mark.asyncio
+async def test_opencode_bridge_relabels_approval_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -358,7 +535,9 @@ async def test_opencode_bridge_relabels_approval_payloads(monkeypatch: pytest.Mo
             bridge_context: dict | None = None,
         ) -> None:
             _ = (observer_mode, observed_session_id)
-            await self.runtime.transition_to(SessionState.WAITING_FOR_APPROVAL, checkpoint_id="chk_bridge_001")
+            await self.runtime.transition_to(
+                SessionState.WAITING_FOR_APPROVAL, checkpoint_id="chk_bridge_001"
+            )
             await self.runtime.emit_approval_required(
                 {
                     "session_id": "child_session",
@@ -379,13 +558,23 @@ async def test_opencode_bridge_relabels_approval_payloads(monkeypatch: pytest.Mo
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: ApprovalBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: ApprovalBridgeConnector(bridge_runtime),
+    )
 
-    await connector._launch_web_bridge({"type": "browser.search", "summary": "Search the web"}, "Search the web", demo_mode=False)
+    await connector._launch_web_bridge(
+        {"type": "browser.search", "summary": "Search the web"},
+        "Search the web",
+        demo_mode=False,
+    )
     await connector._wait_for_bridge_completion()
 
     assert runtime.approvals == [
@@ -406,7 +595,9 @@ async def test_opencode_bridge_relabels_approval_payloads(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_opencode_prevents_duplicate_bridge_launches(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_prevents_duplicate_bridge_launches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -443,15 +634,25 @@ async def test_opencode_prevents_duplicate_bridge_launches(monkeypatch: pytest.M
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: WaitingBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: WaitingBridgeConnector(bridge_runtime),
+    )
 
     trigger = {"type": "browser.search", "summary": "Search the web for docs"}
-    await connector._launch_web_bridge(trigger, "Search the web for docs", demo_mode=False)
-    await connector._launch_web_bridge(trigger, "Search the web for docs", demo_mode=False)
+    await connector._launch_web_bridge(
+        trigger, "Search the web for docs", demo_mode=False
+    )
+    await connector._launch_web_bridge(
+        trigger, "Search the web for docs", demo_mode=False
+    )
 
     assert create_calls == ["Search the web for docs"]
 
@@ -467,7 +668,9 @@ async def test_opencode_unsupported_pause_emits_error() -> None:
     assert runtime.errors[-1]["command_type"] == "pause"
 
 
-def test_opencode_build_run_command_uses_attach_and_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_opencode_build_run_command_uses_attach_and_model_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
 
@@ -543,7 +746,9 @@ async def test_opencode_observe_only_never_offers_bridge() -> None:
 
 
 @pytest.mark.asyncio
-async def test_opencode_observer_event_updates_task_text_and_emits_delegation_offer(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_observer_event_updates_task_text_and_emits_delegation_offer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -592,11 +797,17 @@ async def test_opencode_observer_event_updates_task_text_and_emits_delegation_of
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: ObserverBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: ObserverBridgeConnector(bridge_runtime),
+    )
 
     await connector.observer_event(
         source_event_id="part_001",
@@ -634,7 +845,9 @@ async def test_opencode_observer_event_updates_task_text_and_emits_delegation_of
 
 
 @pytest.mark.asyncio
-async def test_opencode_observer_auto_delegate_launches_bridge_without_offer(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_observer_auto_delegate_launches_bridge_without_offer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -678,11 +891,17 @@ async def test_opencode_observer_auto_delegate_launches_bridge_without_offer(mon
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: AutoBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: AutoBridgeConnector(bridge_runtime),
+    )
 
     await connector.observer_event(
         source_event_id="part_auto_001",
@@ -700,7 +919,9 @@ async def test_opencode_observer_auto_delegate_launches_bridge_without_offer(mon
 
 
 @pytest.mark.asyncio
-async def test_opencode_observer_auto_delegate_ignores_non_browser_events(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_observer_auto_delegate_ignores_non_browser_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -736,18 +957,31 @@ async def test_opencode_observer_auto_delegate_ignores_non_browser_events(monkey
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (demo_mode, web_mode, web_bridge, observer_mode, observed_session_id, bridge_context)
+            _ = (
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
             create_calls.append(task_text)
 
         async def pause(self) -> None: ...
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: AutoBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: AutoBridgeConnector(bridge_runtime),
+    )
 
     await connector.observer_event(
         source_event_id="part_auto_ignore_001",
@@ -765,7 +999,9 @@ async def test_opencode_observer_auto_delegate_ignores_non_browser_events(monkey
 
 
 @pytest.mark.asyncio
-async def test_opencode_bridge_passes_source_url_context(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_bridge_passes_source_url_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -811,11 +1047,17 @@ async def test_opencode_bridge_passes_source_url_context(monkeypatch: pytest.Mon
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: AutoBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: AutoBridgeConnector(bridge_runtime),
+    )
 
     await connector.observer_event(
         source_event_id="part_auto_url_001",
@@ -832,12 +1074,18 @@ async def test_opencode_bridge_passes_source_url_context(monkeypatch: pytest.Mon
         },
     )
 
-    assert bridge_tasks == ["Open and inspect this exact URL in the browser: https://playwright.dev/docs/api/class-page"]
-    assert bridge_contexts[0]["source_url"] == "https://playwright.dev/docs/api/class-page"
+    assert bridge_tasks == [
+        "Open and inspect this exact URL in the browser: https://playwright.dev/docs/api/class-page"
+    ]
+    assert (
+        bridge_contexts[0]["source_url"] == "https://playwright.dev/docs/api/class-page"
+    )
 
 
 @pytest.mark.asyncio
-async def test_opencode_observer_completion_waits_for_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_observer_completion_waits_for_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -870,18 +1118,31 @@ async def test_opencode_observer_completion_waits_for_bridge(monkeypatch: pytest
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, observer_mode, observed_session_id)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+            )
             await self.runtime.emit_session_state()
 
         async def pause(self) -> None: ...
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: WaitingBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: WaitingBridgeConnector(bridge_runtime),
+    )
 
     await connector.observer_event(
         source_event_id="part_002",
@@ -892,10 +1153,15 @@ async def test_opencode_observer_completion_waits_for_bridge(monkeypatch: pytest
         meta={"browser_candidate": True},
     )
     await connector.accept_bridge()
-    await connector.observer_complete("completed", "OpenCode interactive session completed")
+    await connector.observer_complete(
+        "completed", "OpenCode interactive session completed"
+    )
 
     assert runtime.completed is None
-    assert connector.pending_observer_completion == ("completed", "OpenCode interactive session completed")
+    assert connector.pending_observer_completion == (
+        "completed",
+        "OpenCode interactive session completed",
+    )
 
     await connector._on_bridge_complete("completed", "Bridge complete")
 
@@ -1050,7 +1316,9 @@ async def test_opencode_observer_dedupes_repeated_source_event_ids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_opencode_observer_failed_completion_stops_active_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_observer_failed_completion_stops_active_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -1084,20 +1352,33 @@ async def test_opencode_observer_failed_completion_stops_active_bridge(monkeypat
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, observer_mode, observed_session_id)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+            )
             await self.runtime.emit_session_state()
 
         async def pause(self) -> None: ...
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
 
         async def stop(self) -> None:
             stop_calls.append("stop")
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: StopAwareBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: StopAwareBridgeConnector(bridge_runtime),
+    )
 
     await connector.observer_event(
         source_event_id="part_fail_001",
@@ -1115,7 +1396,9 @@ async def test_opencode_observer_failed_completion_stops_active_bridge(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_opencode_accept_bridge_emits_accept_and_launch_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_accept_bridge_emits_accept_and_launch_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -1148,18 +1431,32 @@ async def test_opencode_accept_bridge_emits_accept_and_launch_diagnostics(monkey
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, observer_mode, observed_session_id, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
             await self.runtime.complete_task("completed", "Bridge complete")
 
         async def pause(self) -> None: ...
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: InstantBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: InstantBridgeConnector(bridge_runtime),
+    )
 
     await connector.observer_event(
         source_event_id="part_accept_001",
@@ -1177,7 +1474,9 @@ async def test_opencode_accept_bridge_emits_accept_and_launch_diagnostics(monkey
 
 
 @pytest.mark.asyncio
-async def test_opencode_launch_web_bridge_guard_reason_when_already_running(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_launch_web_bridge_guard_reason_when_already_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -1206,21 +1505,43 @@ async def test_opencode_launch_web_bridge_guard_reason_when_already_running(monk
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, observer_mode, observed_session_id, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
 
         async def pause(self) -> None: ...
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
-    monkeypatch.setattr(registry, "create_connector", lambda bridge_runtime, adapter_id: WaitingBridgeConnector(bridge_runtime))
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: WaitingBridgeConnector(bridge_runtime),
+    )
 
-    trigger = {"type": "browser.search", "summary": "Search the web for docs", "id": "part_guard_001"}
-    await connector._launch_web_bridge(trigger, "Search the web for docs", demo_mode=False)
-    await connector._launch_web_bridge(trigger, "Search the web for docs", demo_mode=False)
+    trigger = {
+        "type": "browser.search",
+        "summary": "Search the web for docs",
+        "id": "part_guard_001",
+    }
+    await connector._launch_web_bridge(
+        trigger, "Search the web for docs", demo_mode=False
+    )
+    await connector._launch_web_bridge(
+        trigger, "Search the web for docs", demo_mode=False
+    )
 
     reason_codes = [item.get("reason_code") for item in runtime.routing_decisions]
     assert "bridge_launch_started" in reason_codes
@@ -1251,7 +1572,103 @@ async def test_opencode_wait_for_bridge_completion_clears_bridge_state() -> None
 
 
 @pytest.mark.asyncio
-async def test_opencode_ensure_browser_delegate_relaunches_after_command_ready_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_execute_browser_command_enriches_takeover_meta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeRuntime()
+    connector = OpenCodeConnector(runtime)
+    runtime.adapter_run_id = connector.adapter_run_id
+    connector.selected_web_mode = "delegate_playwright"
+    connector.selected_web_bridge = "playwright_native"
+
+    class CommandBridgeConnector:
+        adapter_id = "playwright_native"
+        capabilities = {
+            "supports_pause": False,
+            "supports_approval": False,
+            "supports_takeover": True,
+            "supports_frames": True,
+            "supports_direct_takeover": True,
+        }
+
+        def __init__(self, bridge_runtime) -> None:
+            self.runtime = bridge_runtime
+            self.command_mode = True
+            self.command_ready = asyncio.Event()
+            self.command_ready.set()
+            self.takeover_mode = "direct"
+            self.takeover_url = "https://www.wikipedia.org/wiki/OpenAI"
+
+        async def start_task(
+            self,
+            task_text: str,
+            demo_mode: bool = True,
+            web_mode: str | None = None,
+            web_bridge: str | None = None,
+            observer_mode: bool = False,
+            observed_session_id: str | None = None,
+            bridge_context: dict | None = None,
+        ) -> None:
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
+
+        async def execute_browser_command(self, payload):
+            _ = payload
+            return {
+                "command_id": "cmd_status_001",
+                "command": "status",
+                "status": "success",
+                "summary_text": "Browser is ready on wikipedia.org.",
+                "meta": {"snapshot_error": None},
+            }
+
+        async def pause(self) -> None: ...
+        async def resume(self) -> None: ...
+        async def approve(self, checkpoint_id: str) -> None: ...
+        async def reject(self, checkpoint_id: str) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
+        async def end_takeover(self) -> None: ...
+        async def stop(self) -> None: ...
+
+    monkeypatch.setattr(
+        registry,
+        "create_connector",
+        lambda bridge_runtime, adapter_id: CommandBridgeConnector(bridge_runtime),
+    )
+
+    await connector.ensure_browser_delegate(
+        observed_session_id="sess_observer_001", task_text="Open docs"
+    )
+
+    result = await connector.execute_browser_command(
+        {
+            "command_id": "cmd_status_001",
+            "command": "status",
+            "observed_session_id": "sess_observer_001",
+            "project_directory": "/Users/leslie/Documents/Lumon",
+        }
+    )
+
+    assert result["meta"]["snapshot_error"] is None
+    assert result["meta"]["takeover_mode"] == "direct"
+    assert result["meta"]["takeover_url"] == "https://www.wikipedia.org/wiki/OpenAI"
+    assert connector.takeover_mode == "direct"
+    assert connector.takeover_url == "https://www.wikipedia.org/wiki/OpenAI"
+
+
+@pytest.mark.asyncio
+async def test_opencode_ensure_browser_delegate_relaunches_after_command_ready_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     runtime.adapter_run_id = connector.adapter_run_id
@@ -1281,13 +1698,23 @@ async def test_opencode_ensure_browser_delegate_relaunches_after_command_ready_t
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, observer_mode, observed_session_id, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
 
         async def pause(self) -> None: ...
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
 
         async def stop(self) -> None:
@@ -1313,7 +1740,9 @@ async def test_opencode_ensure_browser_delegate_relaunches_after_command_ready_t
     monkeypatch.setattr(asyncio, "wait_for", immediate_timeout)
 
     with pytest.raises(RuntimeError, match="did not become ready"):
-        await connector.ensure_browser_delegate(observed_session_id="sess_observer_001", task_text="Open docs")
+        await connector.ensure_browser_delegate(
+            observed_session_id="sess_observer_001", task_text="Open docs"
+        )
 
     assert len(created_connectors) == 1
     assert created_connectors[0].stop_calls == 1
@@ -1335,7 +1764,15 @@ async def test_opencode_ensure_browser_delegate_relaunches_after_command_ready_t
             observed_session_id: str | None = None,
             bridge_context: dict | None = None,
         ) -> None:
-            _ = (task_text, demo_mode, web_mode, web_bridge, observer_mode, observed_session_id, bridge_context)
+            _ = (
+                task_text,
+                demo_mode,
+                web_mode,
+                web_bridge,
+                observer_mode,
+                observed_session_id,
+                bridge_context,
+            )
             self.command_ready.set()
 
     def create_ready_connector(bridge_runtime, adapter_id):
@@ -1346,7 +1783,9 @@ async def test_opencode_ensure_browser_delegate_relaunches_after_command_ready_t
 
     monkeypatch.setattr(registry, "create_connector", create_ready_connector)
 
-    await connector.ensure_browser_delegate(observed_session_id="sess_observer_001", task_text="Open docs")
+    await connector.ensure_browser_delegate(
+        observed_session_id="sess_observer_001", task_text="Open docs"
+    )
 
     assert len(created_connectors) == 2
     assert connector.bridge_connector is created_connectors[-1]
@@ -1368,7 +1807,9 @@ class _AsyncBytesStream:
 
 
 class _FakeProcess:
-    def __init__(self, stdout_lines: list[bytes], stderr_lines: list[bytes], return_code: int = 0) -> None:
+    def __init__(
+        self, stdout_lines: list[bytes], stderr_lines: list[bytes], return_code: int = 0
+    ) -> None:
         self.stdout = _AsyncBytesStream(stdout_lines)
         self.stderr = _AsyncBytesStream(stderr_lines)
         self._return_code = return_code
@@ -1383,7 +1824,9 @@ class _FakeProcess:
 
 
 @pytest.mark.asyncio
-async def test_opencode_live_stream_emits_browser_activity(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_live_stream_emits_browser_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
 
@@ -1410,7 +1853,9 @@ async def test_opencode_live_stream_emits_browser_activity(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_opencode_live_stream_fails_on_structured_error(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_live_stream_fails_on_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
 
@@ -1430,19 +1875,29 @@ async def test_opencode_live_stream_fails_on_structured_error(monkeypatch: pytes
     await connector._run_live("Open https://www.wikipedia.org")
 
     assert runtime.events[0]["action_type"] == "error"
-    assert runtime.events[0]["summary_text"] == "Error: Was there a typo in the url or port?"
-    assert runtime.errors[-1]["message"] == "OpenCode run failed: Error: Was there a typo in the url or port?"
+    assert (
+        runtime.events[0]["summary_text"]
+        == "Error: Was there a typo in the url or port?"
+    )
+    assert (
+        runtime.errors[-1]["message"]
+        == "OpenCode run failed: Error: Was there a typo in the url or port?"
+    )
     assert runtime.completed == ("failed", "OpenCode adapter run failed")
 
 
 @pytest.mark.asyncio
-async def test_opencode_live_missing_cli_fails_without_demo_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_live_missing_cli_fails_without_demo_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
 
     async def fail_if_demo_called(task_text: str) -> None:
         _ = task_text
-        raise AssertionError("_run_demo must not be called in live mode when opencode is unavailable")
+        raise AssertionError(
+            "_run_demo must not be called in live mode when opencode is unavailable"
+        )
 
     monkeypatch.setattr(shutil, "which", lambda _name: None)
     monkeypatch.setattr(connector, "_run_demo", fail_if_demo_called)
@@ -1456,7 +1911,9 @@ async def test_opencode_live_missing_cli_fails_without_demo_fallback(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_opencode_live_missing_cli_emits_runtime_decision(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_live_missing_cli_emits_runtime_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
 
@@ -1470,7 +1927,9 @@ async def test_opencode_live_missing_cli_emits_runtime_decision(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_opencode_demo_mode_still_uses_demo_when_cli_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_demo_mode_still_uses_demo_when_cli_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
     demo_called = False
@@ -1479,7 +1938,9 @@ async def test_opencode_demo_mode_still_uses_demo_when_cli_missing(monkeypatch: 
         nonlocal demo_called
         _ = task_text
         demo_called = True
-        await runtime.complete_task(status="completed", summary_text="demo path executed")
+        await runtime.complete_task(
+            status="completed", summary_text="demo path executed"
+        )
 
     monkeypatch.setattr(shutil, "which", lambda _name: None)
     monkeypatch.setattr(connector, "_run_demo", fake_demo)
@@ -1491,7 +1952,9 @@ async def test_opencode_demo_mode_still_uses_demo_when_cli_missing(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_opencode_live_filenotfound_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_live_filenotfound_fails_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
 
@@ -1510,7 +1973,9 @@ async def test_opencode_live_filenotfound_fails_cleanly(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_opencode_live_spawn_oserror_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_live_spawn_oserror_fails_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
 
@@ -1528,7 +1993,9 @@ async def test_opencode_live_spawn_oserror_fails_cleanly(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_opencode_unexpected_runtime_error_marks_task_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_opencode_unexpected_runtime_error_marks_task_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = FakeRuntime()
     connector = OpenCodeConnector(runtime)
 

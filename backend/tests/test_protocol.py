@@ -115,6 +115,19 @@ def test_validate_client_message_webrtc_request_with_demo_local_profile() -> Non
     assert message["payload"]["stream_profile"] == "demo_local"
 
 
+def test_validate_client_message_start_takeover_with_mode_preference() -> None:
+    message = validate_client_message(
+        {
+            "type": "start_takeover",
+            "payload": {
+                "mode_preference": "direct",
+            },
+        }
+    )
+    assert message["type"] == "start_takeover"
+    assert message["payload"]["mode_preference"] == "direct"
+
+
 def test_validate_server_bridge_offer_message() -> None:
     message = validate_server_message(
         {
@@ -255,6 +268,8 @@ def test_validate_server_fixture_message() -> None:
             "session_id": "sess_demo_001",
             "adapter_id": "playwright_native",
             "adapter_run_id": "run_demo_001",
+            "takeover_mode": "remote",
+            "takeover_url": None,
             "state": "running",
             "interaction_mode": "watch",
             "active_checkpoint_id": None,
@@ -265,6 +280,7 @@ def test_validate_server_fixture_message() -> None:
                 "supports_approval": True,
                 "supports_takeover": True,
                 "supports_frames": True,
+                "supports_direct_takeover": False,
             },
         },
     }

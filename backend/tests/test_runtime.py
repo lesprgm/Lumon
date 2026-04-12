@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import app.session.manager as session_manager
+from app.adapters.playwright_native import PlaywrightNativeConnector
 from app.config import RUNTIME_VERSION
 from app.protocol.enums import SessionState
 from app.protocol.models import BrowserCommandRecord, LocalObserveOpenCodeRequest
@@ -193,6 +194,92 @@ async def test_manager_rejects_stale_websocket_with_policy_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bootstrapped_session_expires_without_websocket_connection() -> None:
+    manager = SessionManager(
+        allowed_origins=("http://127.0.0.1:8000",),
+        bootstrap_session_ttl_seconds=0.01,
+    )
+
+    created = manager.create_session()
+    assert manager.session_exists(created["session_id"]) is True
+
+    await asyncio.sleep(0.03)
+
+    assert manager.session_exists(created["session_id"]) is False
+
+
+@pytest.mark.asyncio
+async def test_captcha_takeover_return_exposes_single_resume_intent() -> None:
+    manager = SessionManager(allowed_origins=("http://127.0.0.1:8000",))
+    created = manager.create_session()
+    runtime = manager._sessions[created["session_id"]]
+    messages: list[dict] = []
+    runtime.broadcast = _capture_broadcast(messages)  # type: ignore[assignment]
+    connector = PlaywrightNativeConnector(runtime)
+    runtime._connector = connector
+    runtime.state = SessionState.WAITING_FOR_APPROVAL
+    connector.latest_checkpoint_id = "chk_captcha_001"
+    connector.approval_future = asyncio.get_running_loop().create_future()
+
+    await connector.start_takeover()
+    assert runtime.state == SessionState.TAKEOVER
+
+    await connector.end_takeover()
+    assert runtime.state == SessionState.RUNNING
+
+    first = manager.consume_local_resume_intent(created["session_id"], after_seq=0)
+    assert first["pending"] is True
+    assert first["reason"] == "takeover_returned_control"
+    first_seq = int(first["resume_intent_seq"])
+
+    second = manager.consume_local_resume_intent(
+        created["session_id"], after_seq=first_seq
+    )
+    assert second["pending"] is False
+    assert second["resume_intent_seq"] == first_seq
+
+
+@pytest.mark.asyncio
+async def test_resume_intent_peek_then_acknowledge_marks_consumed() -> None:
+    manager = SessionManager(allowed_origins=("http://127.0.0.1:8000",))
+    created = manager.create_session()
+    runtime = manager._sessions[created["session_id"]]
+
+    runtime.request_resume_intent(reason="takeover_returned_control")
+
+    peek = manager.read_local_resume_intent(created["session_id"], after_seq=0)
+    assert peek["pending"] is True
+    seq = int(peek["resume_intent_seq"])
+
+    ack = manager.acknowledge_local_resume_intent(
+        created["session_id"], resume_intent_seq=seq
+    )
+    assert ack["acknowledged"] is True
+    assert ack["consumed_seq"] == seq
+
+    after_ack = manager.read_local_resume_intent(created["session_id"], after_seq=seq)
+    assert after_ack["pending"] is False
+    assert after_ack["resume_intent_seq"] == seq
+
+
+@pytest.mark.asyncio
+async def test_resume_intent_consume_legacy_path_still_consumes() -> None:
+    manager = SessionManager(allowed_origins=("http://127.0.0.1:8000",))
+    created = manager.create_session()
+    runtime = manager._sessions[created["session_id"]]
+
+    runtime.request_resume_intent(reason="takeover_returned_control")
+    consumed = manager.read_local_resume_intent(
+        created["session_id"], after_seq=0, consume=True
+    )
+    assert consumed["pending"] is True
+    seq = int(consumed["resume_intent_seq"])
+
+    after = manager.read_local_resume_intent(created["session_id"], after_seq=seq)
+    assert after["pending"] is False
+
+
+@pytest.mark.asyncio
 async def test_failed_command_mode_approval_does_not_resolve_active_intervention() -> (
     None
 ):
@@ -210,6 +297,7 @@ async def test_failed_command_mode_approval_does_not_resolve_active_intervention
             "supports_approval": True,
             "supports_takeover": True,
             "supports_frames": True,
+            "supports_direct_takeover": False,
         }
 
         async def approve(self, checkpoint_id: str) -> dict[str, str]:
@@ -254,6 +342,7 @@ async def test_successful_command_mode_approval_resolves_active_intervention() -
             "supports_approval": True,
             "supports_takeover": True,
             "supports_frames": True,
+            "supports_direct_takeover": False,
         }
 
         async def approve(self, checkpoint_id: str) -> dict[str, str]:
@@ -364,6 +453,7 @@ async def test_local_observe_attach_reuses_existing_session(
             "supports_approval": False,
             "supports_takeover": False,
             "supports_frames": False,
+            "supports_direct_takeover": False,
         }
 
         def __init__(self, runtime: SessionRuntime) -> None:
@@ -401,7 +491,9 @@ async def test_local_observe_attach_reuses_existing_session(
         async def reject(self, checkpoint_id: str) -> None: ...
         async def accept_bridge(self) -> None: ...
         async def decline_bridge(self) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
@@ -450,6 +542,7 @@ async def test_local_observe_attach_rolls_back_failed_runtime(
             "supports_approval": False,
             "supports_takeover": False,
             "supports_frames": False,
+            "supports_direct_takeover": False,
         }
 
         def __init__(self, runtime: SessionRuntime) -> None:
@@ -485,7 +578,9 @@ async def test_local_observe_attach_rolls_back_failed_runtime(
         async def reject(self, checkpoint_id: str) -> None: ...
         async def accept_bridge(self) -> None: ...
         async def decline_bridge(self) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
@@ -538,12 +633,21 @@ async def test_emit_session_state_includes_selected_web_mode() -> None:
     runtime.adapter_id = "opencode"
     runtime.web_mode = "delegate_playwright"
     runtime.web_bridge = "playwright_native"
+    runtime._connector.takeover_mode = "direct"  # type: ignore[attr-defined]
+    runtime._connector.takeover_url = "https://www.wikipedia.org/wiki/OpenAI"  # type: ignore[attr-defined]
+    runtime._connector.capabilities["supports_direct_takeover"] = True  # type: ignore[attr-defined]
 
     await runtime.emit_session_state()
 
     assert messages[-1]["type"] == "session_state"
     assert messages[-1]["payload"]["web_mode"] == "delegate_playwright"
     assert messages[-1]["payload"]["web_bridge"] == "playwright_native"
+    assert messages[-1]["payload"]["takeover_mode"] == "direct"
+    assert (
+        messages[-1]["payload"]["takeover_url"]
+        == "https://www.wikipedia.org/wiki/OpenAI"
+    )
+    assert messages[-1]["payload"]["capabilities"]["supports_direct_takeover"] is True
 
 
 @pytest.mark.asyncio
@@ -619,6 +723,103 @@ async def test_emit_frame_keeps_latest_frame_state_when_websocket_broadcast_is_s
     assert runtime._latest_frame_payload is not None
     assert runtime._latest_frame_payload["frame_seq"] == 7
     assert runtime._artifact.latest_frame is not None
+
+
+@pytest.mark.asyncio
+async def test_emit_frame_broadcasts_in_direct_takeover_even_with_webrtc_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = SessionRuntime()
+    messages: list[dict] = []
+    runtime.broadcast = _capture_broadcast(messages)  # type: ignore[assignment]
+    runtime._webrtc_ready = True
+    runtime._connector.takeover_mode = "direct"
+
+    monkeypatch.delenv("LUMON_DISABLE_FRAME_STREAM_ON_WEBRTC", raising=False)
+
+    await runtime.emit_frame(
+        {
+            "mime_type": "image/png",
+            "data_base64": "ZmFrZQ==",
+            "frame_seq": 11,
+        }
+    )
+
+    assert len(messages) == 1
+    assert messages[0]["type"] == "frame"
+    assert messages[0]["payload"]["frame_seq"] == 11
+
+
+@pytest.mark.asyncio
+async def test_emit_frame_throttles_direct_takeover_when_ui_hidden() -> None:
+    runtime = SessionRuntime()
+    messages: list[dict] = []
+    runtime.broadcast = _capture_broadcast(messages)  # type: ignore[assignment]
+    runtime._connector.takeover_mode = "direct"
+    runtime._ui_visible = False
+
+    for seq in range(1, 5):
+        await runtime.emit_frame(
+            {
+                "mime_type": "image/png",
+                "data_base64": "ZmFrZQ==",
+                "frame_seq": seq,
+            }
+        )
+
+    assert len(messages) == 1
+    assert messages[0]["type"] == "frame"
+    assert messages[0]["payload"]["frame_seq"] == 4
+
+
+@pytest.mark.asyncio
+async def test_record_ui_telemetry_tracks_visibility_for_throttle() -> None:
+    runtime = SessionRuntime()
+
+    runtime.record_ui_telemetry(
+        session_manager.UiTelemetryPayload(
+            event="video_quality_sample",
+            source="frontend",
+            meta={"visibility_state": "hidden", "hidden": True},
+        )
+    )
+    assert runtime._ui_visible is False
+
+    runtime.record_ui_telemetry(
+        session_manager.UiTelemetryPayload(
+            event="video_quality_sample",
+            source="frontend",
+            meta={"visibility_state": "visible", "hidden": False},
+        )
+    )
+    assert runtime._ui_visible is True
+
+
+@pytest.mark.asyncio
+async def test_start_takeover_message_forwards_mode_preference_to_connector() -> None:
+    runtime = SessionRuntime()
+    runtime.state = SessionState.RUNNING
+    captured_preferences: list[str | None] = []
+
+    class FakeConnector:
+        capabilities = {
+            "supports_pause": True,
+            "supports_approval": True,
+            "supports_takeover": True,
+            "supports_frames": True,
+            "supports_direct_takeover": True,
+        }
+
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            captured_preferences.append(mode_preference)
+
+    runtime._connector = FakeConnector()  # type: ignore[assignment]
+
+    await runtime.handle_client_message(
+        {"type": "start_takeover", "payload": {"mode_preference": "direct"}}
+    )
+
+    assert captured_preferences == ["direct"]
 
 
 @pytest.mark.asyncio
@@ -731,7 +932,9 @@ async def test_start_task_uses_connector_factory(
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
@@ -806,7 +1009,9 @@ async def test_start_task_defaults_to_live_when_demo_mode_omitted(
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
@@ -886,7 +1091,9 @@ async def test_attach_observer_uses_live_opencode_observer_mode(
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
@@ -963,7 +1170,9 @@ async def test_explicit_observe_only_overrides_legacy_web_bridge(
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 
@@ -1031,7 +1240,9 @@ async def test_attach_observer_passes_auto_delegate(
         async def resume(self) -> None: ...
         async def approve(self, checkpoint_id: str) -> None: ...
         async def reject(self, checkpoint_id: str) -> None: ...
-        async def start_takeover(self) -> None: ...
+        async def start_takeover(self, mode_preference: str | None = None) -> None:
+            _ = mode_preference
+
         async def end_takeover(self) -> None: ...
         async def stop(self) -> None: ...
 

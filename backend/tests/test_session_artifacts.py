@@ -693,6 +693,106 @@ def test_session_artifact_route_keeps_distinct_commands_that_share_a_command_id(
         shutil.rmtree(output_root, ignore_errors=True)
 
 
+def test_session_artifact_route_caps_events_and_commands() -> None:
+    app = create_app()
+    session_id = "sess_route_truncation_001"
+    output_root = (
+        Path(__file__).resolve().parents[2] / "output" / "sessions" / session_id
+    )
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        (output_root / "session.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "adapter_id": "opencode",
+                    "adapter_run_id": "run_route_truncation_001",
+                    "task_text": "Review route artifact truncation",
+                    "observer_mode": True,
+                    "status": "completed",
+                    "started_at": "2026-03-12T00:00:00Z",
+                    "completed_at": "2026-03-12T00:00:05Z",
+                    "summary_text": "Finished truncation route test",
+                    "browser_context": None,
+                    "pages_visited": [],
+                    "interventions": [],
+                    "keyframes": [],
+                    "metrics": {
+                        "attach_requested_at": None,
+                        "attached_at": None,
+                        "first_browser_event_at": None,
+                        "ui_open_requested_at": None,
+                        "ui_ready_at": None,
+                        "attach_latency_ms": None,
+                        "ui_open_latency_ms": None,
+                        "browser_episode_count": 0,
+                        "intervention_count": 0,
+                        "reconnect_count": 0,
+                        "duplicate_attach_prevented": 0,
+                        "browser_command_count": 0,
+                        "verified_browser_action_count": 0,
+                        "browser_blocked_count": 0,
+                        "browser_partial_count": 0,
+                        "stale_target_count": 0,
+                        "session_completed": True,
+                        "artifact_written": True,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (output_root / "events.ndjson").write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "type": "agent_event",
+                        "payload": {"index": index},
+                    }
+                )
+                for index in range(5)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (output_root / "commands.ndjson").write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "command_id": f"cmd_{index:03d}",
+                        "command": "inspect",
+                        "status": "success",
+                        "summary_text": f"Command {index}",
+                        "timestamp": f"2026-03-12T00:00:0{index}Z",
+                        "meta": {},
+                    }
+                )
+                for index in range(5)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with TestClient(app) as client:
+            artifact_response = client.get(
+                f"/api/session-artifacts/{session_id}?event_limit=2&command_limit=3"
+            )
+            assert artifact_response.status_code == 200
+            payload = artifact_response.json()
+            assert payload["event_limit"] == 2
+            assert payload["command_limit"] == 3
+            assert payload["events_truncated"] is True
+            assert payload["commands_truncated"] is True
+            assert [event["payload"]["index"] for event in payload["events"]] == [3, 4]
+            assert len(payload["commands"]) == 3
+            assert [command["command_id"] for command in payload["commands"]] == [
+                "cmd_002",
+                "cmd_003",
+                "cmd_004",
+            ]
+    finally:
+        shutil.rmtree(output_root, ignore_errors=True)
+
+
 def test_record_browser_context_attaches_keyframe_to_page_visit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
