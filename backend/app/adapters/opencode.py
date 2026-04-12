@@ -30,11 +30,14 @@ _URL_PATTERN = re.compile(r"https?://[^\s)>\"]+")
 
 class OpenCodeConnector(AdapterConnector):
     adapter_id = "opencode"
+    takeover_mode = None
+    takeover_url = None
     base_capabilities = {
         "supports_pause": False,
         "supports_approval": False,
         "supports_takeover": False,
         "supports_frames": False,
+        "supports_direct_takeover": False,
     }
 
     def __init__(self, runtime: "SessionRuntimeProtocol") -> None:
@@ -67,6 +70,11 @@ class OpenCodeConnector(AdapterConnector):
             return merged
         for key, value in self.bridge_connector.capabilities.items():
             merged[key] = bool(merged.get(key, False) or value)
+        merged["supports_direct_takeover"] = bool(
+            getattr(self.bridge_connector, "capabilities", {}).get(
+                "supports_direct_takeover", False
+            )
+        )
         return merged
 
     async def start_task(
@@ -588,6 +596,8 @@ class OpenCodeConnector(AdapterConnector):
         )
         self.bridge_runtime = _BridgeRuntimeProxy(self, bridge_id, bridge_task_text)
         self.bridge_connector = create_connector(self.bridge_runtime, bridge_id)
+        self.takeover_mode = getattr(self.bridge_connector, "takeover_mode", None)
+        self.takeover_url = getattr(self.bridge_connector, "takeover_url", None)
         await self.runtime.emit_agent_event(
             self._normalize_opencode_event(
                 {
@@ -664,7 +674,27 @@ class OpenCodeConnector(AdapterConnector):
         execute = getattr(self.bridge_connector, "execute_browser_command", None)
         if execute is None:
             raise RuntimeError("Active browser bridge does not support commands")
-        return await execute(payload)
+        result = await execute(payload)
+        if not isinstance(result, dict):
+            return result
+
+        self.takeover_mode = getattr(self.bridge_connector, "takeover_mode", None)
+        self.takeover_url = getattr(self.bridge_connector, "takeover_url", None)
+
+        meta = result.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        else:
+            meta = dict(meta)
+
+        if self.takeover_mode in {"remote", "direct"}:
+            meta.setdefault("takeover_mode", self.takeover_mode)
+        if isinstance(self.takeover_url, str) and self.takeover_url.strip():
+            meta.setdefault("takeover_url", self.takeover_url)
+
+        enriched = dict(result)
+        enriched["meta"] = meta
+        return enriched
 
     async def _maybe_offer_bridge(self, raw: dict[str, Any], task_text: str) -> None:
         if not self._delegation_enabled() or self._bridge_is_running():
@@ -737,6 +767,8 @@ class OpenCodeConnector(AdapterConnector):
         self.bridge_connector = None
         self.bridge_runtime = None
         self.active_web_bridge = None
+        self.takeover_mode = None
+        self.takeover_url = None
         return result
 
     def _bridge_is_running(self) -> bool:
@@ -752,6 +784,8 @@ class OpenCodeConnector(AdapterConnector):
         self.bridge_connector = None
         self.bridge_runtime = None
         self.active_web_bridge = None
+        self.takeover_mode = None
+        self.takeover_url = None
 
         if status == "completed":
             if self.observer_mode and self.pending_observer_completion is not None:
@@ -796,6 +830,8 @@ class OpenCodeConnector(AdapterConnector):
         self.bridge_connector = None
         self.bridge_runtime = None
         self.active_web_bridge = None
+        self.takeover_mode = None
+        self.takeover_url = None
 
     def _coerce_web_bridge(self, value: str | None) -> WebBridgeId | None:
         if value == "playwright_native":
@@ -1220,9 +1256,11 @@ class OpenCodeConnector(AdapterConnector):
         )
         return False
 
-    async def start_takeover(self) -> None:
+    async def start_takeover(self, mode_preference: str | None = None) -> None:
         if self.bridge_connector is not None:
-            await self.bridge_connector.start_takeover()
+            await self.bridge_connector.start_takeover(mode_preference)
+            self.takeover_mode = getattr(self.bridge_connector, "takeover_mode", None)
+            self.takeover_url = getattr(self.bridge_connector, "takeover_url", None)
             return
         await self.runtime.emit_error(
             ErrorCode.INVALID_STATE,
@@ -1233,6 +1271,8 @@ class OpenCodeConnector(AdapterConnector):
     async def end_takeover(self) -> None:
         if self.bridge_connector is not None:
             await self.bridge_connector.end_takeover()
+            self.takeover_mode = getattr(self.bridge_connector, "takeover_mode", None)
+            self.takeover_url = getattr(self.bridge_connector, "takeover_url", None)
             return
         await self.runtime.emit_error(
             ErrorCode.INVALID_STATE,
@@ -1442,6 +1482,14 @@ class _BridgeRuntimeProxy:
     def record_browser_command(self, record: BrowserCommandRecord) -> None:
         self.parent.runtime.record_browser_command(record)
 
+    def request_resume_intent(self, *, reason: str) -> dict[str, Any] | None:
+        request_resume_intent = getattr(
+            self.parent.runtime, "request_resume_intent", None
+        )
+        if callable(request_resume_intent):
+            return request_resume_intent(reason=reason)
+        return None
+
 
 class SessionRuntimeProtocol:
     session_id: str
@@ -1468,4 +1516,5 @@ class SessionRuntimeProtocol:
     ) -> None: ...
     async def complete_task(self, status: str, summary_text: str) -> None: ...
     def emit_routing_decision(self, payload: dict[str, Any]) -> None: ...
+    def request_resume_intent(self, *, reason: str) -> dict[str, Any] | None: ...
     def timestamp(self) -> str: ...

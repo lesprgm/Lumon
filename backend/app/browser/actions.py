@@ -45,6 +45,8 @@ POST_ACTION_DELAY_SECONDS: dict[ActionType, float] = {
 TARGET_RESOLUTION_TIMEOUT_SECONDS = 0.5
 TYPE_ACTION_TIMEOUT_SECONDS = 3.0
 VALUE_READ_TIMEOUT_SECONDS = 0.5
+TYPE_FALLBACK_TARGET_WIDTH = 220
+TYPE_FALLBACK_TARGET_HEIGHT = 40
 
 
 async def _noop_emit_browser_context(_payload: dict[str, Any]) -> None:
@@ -158,6 +160,12 @@ class BrowserActionLayer:
         await self.gate_check()
         locator = self.page.locator(selector).first
         cursor, target_rect, meta = await self._target_for_selector(selector)
+        if target_rect is None:
+            target_rect = self._fallback_target_rect_for_type(cursor)
+            meta = {
+                **meta,
+                "inferred_target_rect": True,
+            }
         await self._emit_event(
             agent_id="main_001",
             agent_kind=AgentKind.MAIN,
@@ -189,6 +197,18 @@ class BrowserActionLayer:
                     timeout=VALUE_READ_TIMEOUT_SECONDS,
                 )
         return {"value_after": value_after}
+
+    def _fallback_target_rect_for_type(self, cursor: dict[str, int]) -> dict[str, int]:
+        width = TYPE_FALLBACK_TARGET_WIDTH
+        height = TYPE_FALLBACK_TARGET_HEIGHT
+        rect_x = max(0, min(VIEWPORT_WIDTH - width, cursor["x"] - width // 2))
+        rect_y = max(0, min(VIEWPORT_HEIGHT - height, cursor["y"] - height // 2))
+        return {
+            "x": rect_x,
+            "y": rect_y,
+            "width": width,
+            "height": height,
+        }
 
     async def scroll_by(
         self, delta_y: int, summary_text: str, intent: str

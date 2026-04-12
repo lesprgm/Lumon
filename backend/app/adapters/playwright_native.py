@@ -49,7 +49,7 @@ except Exception:  # pragma: no cover
     async_playwright = None
 
 
-StreamMode = Literal["live", "option_a"]
+StreamMode = Literal["live", "option_a", "none"]
 DemoVariant = Literal["primary", "backup"]
 _URL_PATTERN = re.compile(
     r"(https?://[^\s)>\"]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s)]*)?)", re.IGNORECASE
@@ -57,6 +57,12 @@ _URL_PATTERN = re.compile(
 COMMAND_READY_TIMEOUT_SECONDS = float(
     os.getenv("LUMON_COMMAND_READY_TIMEOUT_SECONDS", "45")
 )
+
+
+def _stream_paused_for_direct_takeover(
+    state: SessionState, takeover_mode: str | None
+) -> bool:
+    return state == SessionState.TAKEOVER and takeover_mode == "direct"
 
 
 def _normalize_command_label(value: str) -> str:
@@ -167,6 +173,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         "supports_approval": True,
         "supports_takeover": True,
         "supports_frames": True,
+        "supports_direct_takeover": False,
     }
 
     def __init__(
@@ -174,6 +181,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         runtime: "SessionRuntimeProtocol",
     ) -> None:
         self.runtime = runtime
+        self.capabilities = dict(type(self).capabilities)
         self.adapter_run_id = new_id("run")
         self.event_seq = count(1)
         self.run_task: asyncio.Task[None] | None = None
@@ -201,6 +209,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.command_ready = asyncio.Event()
         self.command_stop_event = asyncio.Event()
         self.command_lock = asyncio.Lock()
+        self.browser_lifecycle_lock = asyncio.Lock()
         self.command_inflight_id: str | None = None
         self.command_results: dict[str, dict[str, Any]] = {}
         self.pending_browser_commands: dict[str, dict[str, Any]] = {}
@@ -212,6 +221,11 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.last_snapshot_error: str | None = None
         self.last_begin_task_open_url: str | None = None
         self.last_begin_task_opened_at = 0.0
+        self.takeover_mode = "remote"
+        self.takeover_url: str | None = None
+        self._headless = True
+        self._direct_takeover_hud_installed = False
+        self._runtime_relaunching = False
 
     async def start_task(
         self,
@@ -287,7 +301,11 @@ class PlaywrightNativeConnector(AdapterConnector):
 
     async def _run_command_delegate(self) -> None:
         try:
-            await self._launch_browser()
+            await self._ensure_browser_runtime_launched(
+                headless=True, start_stream_transport=False
+            )
+            self.takeover_mode = "remote"
+            self.capabilities["supports_direct_takeover"] = True
             self.command_delegate_error = None
             self.command_ready.set()
             await self.runtime.transition_to(SessionState.RUNNING)
@@ -615,6 +633,8 @@ class PlaywrightNativeConnector(AdapterConnector):
                 meta={
                     "snapshot_error": self.last_snapshot_error,
                     "recovery_hint": None,
+                    "takeover_mode": self.takeover_mode,
+                    "takeover_url": self.takeover_url,
                 },
             )
 
@@ -1106,11 +1126,18 @@ class PlaywrightNativeConnector(AdapterConnector):
             )
 
     def _get_frame_emitted_event(self) -> asyncio.Event | None:
-        if self.stream_mode == "option_a" and self.option_a_streamer is not None:
+        if self.option_a_streamer is not None:
             return self.option_a_streamer.frame_emitted_event
         if self.live_streamer is not None:
             return self.live_streamer.frame_emitted_event
         return None
+
+    def _effective_stream_mode(self) -> StreamMode:
+        if _stream_paused_for_direct_takeover(self.runtime.state, self.takeover_mode):
+            return "none"
+        if not self._headless:
+            return "option_a"
+        return self.stream_mode
 
     async def _adopt_page(self, page: Page) -> None:
         if self.context is None:
@@ -1119,10 +1146,15 @@ class PlaywrightNativeConnector(AdapterConnector):
             return
         self._bind_page_lifecycle(page)
         self.page = page
+        with contextlib.suppress(Exception):
+            self.takeover_url = str(getattr(page, "url", "") or "") or None
         if self.action_layer is not None:
             self.action_layer.page = page
-        await self._stop_webrtc_capture_loop()
-        if self.stream_mode == "option_a":
+        await self._stop_stream_transport()
+        effective_stream_mode = self._effective_stream_mode()
+        if effective_stream_mode == "none":
+            return
+        if effective_stream_mode == "option_a":
             if self.live_streamer is not None:
                 await self.live_streamer.stop()
                 self.live_streamer = None
@@ -1132,6 +1164,11 @@ class PlaywrightNativeConnector(AdapterConnector):
                 page,
                 self.runtime.emit_frame,
                 profile_config=self.stream_profile,
+                interval_seconds=(
+                    max(self.stream_profile.screenshot_interval_seconds, 0.2)
+                    if not self._headless
+                    else None
+                ),
             )
             await self.option_a_streamer.start()
         else:
@@ -1147,7 +1184,12 @@ class PlaywrightNativeConnector(AdapterConnector):
                 profile_config=self.stream_profile,
             )
             await self.live_streamer.start()
-            asyncio.create_task(self._watch_live_stream_health())
+            if self._headless:
+                self.live_stream_health_task = asyncio.create_task(
+                    self._watch_live_stream_health()
+                )
+            else:
+                self.live_stream_health_task = None
         await self._sync_page_version(force=True)
         if self.action_layer is not None:
             await self.action_layer.refresh_browser_context()
@@ -1162,6 +1204,14 @@ class PlaywrightNativeConnector(AdapterConnector):
         if latest_page is not self.page:
             await self._adopt_page(latest_page)
 
+    async def _sync_takeover_page_reference(self) -> None:
+        await self._maybe_switch_to_foreground_page()
+        page = self.page
+        if page is None:
+            return
+        with contextlib.suppress(Exception):
+            self.takeover_url = str(getattr(page, "url", "") or "") or None
+
     def _bind_page_lifecycle(self, page: Page) -> None:
         with contextlib.suppress(Exception):
             page.on(
@@ -1171,6 +1221,13 @@ class PlaywrightNativeConnector(AdapterConnector):
                     page_version=self.page_version,
                     current_url=self.current_page_url,
                     runtime_state=self.runtime.state.value,
+                ),
+            )
+        with contextlib.suppress(Exception):
+            page.on(
+                "framenavigated",
+                lambda frame: asyncio.create_task(
+                    self._handle_page_frame_navigated(page, frame)
                 ),
             )
 
@@ -1183,6 +1240,8 @@ class PlaywrightNativeConnector(AdapterConnector):
     async def _sync_page_version(self, *, force: bool) -> bool:
         await self._maybe_switch_to_foreground_page()
         current_url = str(getattr(self.page, "url", "") or "")
+        if current_url:
+            self.takeover_url = current_url
         if force or current_url != self.current_page_url:
             self.page_version += 1
             self.current_page_url = current_url
@@ -1207,6 +1266,7 @@ class PlaywrightNativeConnector(AdapterConnector):
                 "frame_seq": next(self.snapshot_frame_seq),
                 "__skip_webrtc": True,
                 "__command_snapshot": command_snapshot,
+                "__force_ui_broadcast": True,
             }
         )
         return True
@@ -1224,20 +1284,6 @@ class PlaywrightNativeConnector(AdapterConnector):
             if attempt < attempts - 1:
                 await asyncio.sleep(delay_seconds)
         return False
-
-    async def _wait_for_fresh_frame(
-        self, previous_generation: int, *, timeout_seconds: float = 0.1
-    ) -> bool:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
-        while loop.time() < deadline:
-            if (
-                getattr(self.runtime, "latest_frame_generation", 0)
-                > previous_generation
-            ):
-                return True
-            await asyncio.sleep(0.01)
-        return getattr(self.runtime, "latest_frame_generation", 0) > previous_generation
 
     async def _wait_for_fresh_command_frame(
         self, previous_generation: int, *, timeout_seconds: float = 0.2
@@ -1309,14 +1355,6 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.last_begin_task_open_url = None
         self.last_begin_task_opened_at = 0.0
 
-    async def set_stream_profile(self, profile_name: str | None) -> None:
-        next_profile = resolve_stream_profile(profile_name)
-        if next_profile == self.stream_profile:
-            return
-        self.stream_profile = next_profile
-        if self.page is not None:
-            await self._start_stream_transport()
-
     def _infer_url_from_task_text(self, task_text: str | None) -> str | None:
         if not task_text:
             return None
@@ -1329,6 +1367,8 @@ class PlaywrightNativeConnector(AdapterConnector):
         return f"https://{candidate}"
 
     def _bridge_is_alive(self) -> bool:
+        if self.command_mode and self._runtime_relaunching:
+            return True
         if self.command_mode and self.command_stop_event.is_set():
             return False
         if self.browser is None or self.context is None or self.page is None:
@@ -1711,17 +1751,41 @@ class PlaywrightNativeConnector(AdapterConnector):
             )
         )
 
-    async def _launch_browser(self) -> None:
+    async def _launch_browser(self, *, headless_override: bool | None = None) -> None:
         if async_playwright is None:  # pragma: no cover
             raise RuntimeError("Playwright is not installed")
-        headless = os.getenv("LUMON_HEADLESS", "1") != "0"
-        scale_factor = self._resolve_device_scale_factor()
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=headless)
-        self.context = await self.browser.new_context(
-            viewport={"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
-            device_scale_factor=scale_factor,
+        headless = (
+            headless_override
+            if headless_override is not None
+            else os.getenv("LUMON_HEADLESS", "1") != "0"
         )
+        self._log_runtime_event(
+            "launch_browser_begin",
+            headless_override=headless_override,
+            resolved_headless=headless,
+            env_headless=os.getenv("LUMON_HEADLESS"),
+            stream_mode=self.stream_mode,
+        )
+        self._headless = headless
+        self.takeover_mode = "remote" if headless else "direct"
+        self.takeover_url = None
+        self.capabilities["supports_direct_takeover"] = bool(
+            self.command_mode or not headless
+        )
+        if self.playwright is None:
+            self.playwright = await async_playwright().start()
+        assert self.playwright is not None
+        self.browser = await self.playwright.chromium.launch(headless=headless)
+        context_options: dict[str, Any] = {}
+        if headless:
+            context_options["device_scale_factor"] = self._resolve_device_scale_factor()
+            context_options["viewport"] = {
+                "width": VIEWPORT_WIDTH,
+                "height": VIEWPORT_HEIGHT,
+            }
+        else:
+            context_options["viewport"] = None
+        self.context = await self.browser.new_context(**context_options)
         with contextlib.suppress(Exception):
             self.context.on(
                 "close",
@@ -1748,7 +1812,10 @@ class PlaywrightNativeConnector(AdapterConnector):
             self.context.on(
                 "page", lambda page: asyncio.create_task(self._adopt_page(page))
             )
-        self.cdp_session = await self.context.new_cdp_session(self.page)
+        if self._effective_stream_mode() != "option_a":
+            self.cdp_session = await self.context.new_cdp_session(self.page)
+        else:
+            self.cdp_session = None
         self.action_layer = BrowserActionLayer(
             session_id=self.runtime.session_id,
             adapter_id=self.adapter_id,
@@ -1761,12 +1828,187 @@ class PlaywrightNativeConnector(AdapterConnector):
             gate_check=self._wait_for_run_permission,
             frame_sync=self._get_frame_emitted_event,
         )
+        if self.page is not None:
+            with contextlib.suppress(Exception):
+                self.takeover_url = str(getattr(self.page, "url", "") or "") or None
         await self._sync_page_version(force=True)
+        self._log_runtime_event(
+            "launch_browser_ready",
+            headless=self._headless,
+            takeover_mode=self.takeover_mode,
+            takeover_url=self.takeover_url,
+            supports_direct_takeover=self.capabilities.get("supports_direct_takeover"),
+        )
+
+    async def _install_direct_takeover_hud(self) -> None:
+        if self._headless:
+            return
+        page = self.page
+        if page is None:
+            return
+        with contextlib.suppress(Exception):
+            await page.expose_binding(
+                "__lumonEndTakeover",
+                lambda _source: asyncio.create_task(self.end_takeover()),
+            )
+        script = """
+(() => {
+  const ROOT_ID = '__lumon-direct-takeover-root';
+  const STYLE_ID = '__lumon-direct-takeover-style';
+  const HANDLER_KEY = '__lumonTakeoverEscHandler';
+  const dismiss = () => {
+    const root = document.getElementById(ROOT_ID);
+    if (root) root.remove();
+  };
+  dismiss();
+  let style = document.getElementById(STYLE_ID);
+  if (!style) {
+    style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+      #${ROOT_ID} {
+        position: fixed;
+        right: 12px;
+        top: 12px;
+        z-index: 2147483646;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 999px;
+        background: rgba(26, 22, 18, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        box-shadow: 0 12px 30px rgba(0,0,0,0.3);
+        color: #fffaf4;
+        font: 600 12px/1.2 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      }
+      #${ROOT_ID} button {
+        border: 1px solid rgba(255,255,255,0.28);
+        background: rgba(255,255,255,0.15);
+        color: #fffaf4;
+        min-height: 28px;
+        border-radius: 999px;
+        padding: 0 10px;
+        font: 600 12px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        cursor: pointer;
+      }
+      #${ROOT_ID} button:hover { background: rgba(255,255,255,0.22); }
+      #${ROOT_ID} code {
+        font: 600 11px/1 Menlo, Consolas, monospace;
+        border: 1px solid rgba(255,255,255,0.25);
+        border-radius: 8px;
+        padding: 2px 5px;
+        background: rgba(255,255,255,0.1);
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+  const root = document.createElement('div');
+  root.id = ROOT_ID;
+  root.setAttribute('role', 'dialog');
+  root.setAttribute('aria-label', 'Lumon direct takeover controls');
+  root.innerHTML = `<span>Lumon direct control</span><code>Esc</code><button type='button'>Return control</button>`;
+  const button = root.querySelector('button');
+  if (button) {
+    button.addEventListener('click', () => {
+      if (typeof window.__lumonEndTakeover === 'function') {
+        window.__lumonEndTakeover();
+      }
+    });
+  }
+  if (typeof window[HANDLER_KEY] === 'function') {
+    window.removeEventListener('keydown', window[HANDLER_KEY], true);
+  }
+  const onKey = (event) => {
+    if (event.key === 'Escape') {
+      if (typeof window.__lumonEndTakeover === 'function') {
+        window.__lumonEndTakeover();
+      }
+    }
+  };
+  window[HANDLER_KEY] = onKey;
+  window.addEventListener('keydown', onKey, true);
+  document.documentElement.appendChild(root);
+})();
+"""
+        with contextlib.suppress(Exception):
+            await page.evaluate(script)
+            self._direct_takeover_hud_installed = True
+
+    async def _remove_direct_takeover_hud(self) -> None:
+        page = self.page
+        if page is None:
+            self._direct_takeover_hud_installed = False
+            return
+        with contextlib.suppress(Exception):
+            await page.evaluate(
+                """
+(() => {
+  const HANDLER_KEY = '__lumonTakeoverEscHandler';
+  const root = document.getElementById('__lumon-direct-takeover-root');
+  if (root) root.remove();
+  if (typeof window[HANDLER_KEY] === 'function') {
+    window.removeEventListener('keydown', window[HANDLER_KEY], true);
+    window[HANDLER_KEY] = null;
+  }
+})();
+"""
+            )
+        self._direct_takeover_hud_installed = False
+
+    async def _maybe_refresh_direct_takeover_hud(self) -> None:
+        if self.takeover_mode != "direct":
+            return
+        if self.runtime.state != SessionState.TAKEOVER:
+            return
+        await self._install_direct_takeover_hud()
+
+    async def _handle_page_frame_navigated(self, page: Page, frame: Any) -> None:
+        if page is not self.page:
+            return
+        is_main_frame = False
+        with contextlib.suppress(Exception):
+            is_main_frame = frame == page.main_frame
+        if not is_main_frame:
+            with contextlib.suppress(Exception):
+                parent_frame = frame.parent_frame
+                if callable(parent_frame):
+                    parent_frame = parent_frame()
+                is_main_frame = parent_frame is None
+        if not is_main_frame:
+            return
+        with contextlib.suppress(Exception):
+            self.takeover_url = str(getattr(page, "url", "") or "") or None
+        await self._maybe_refresh_direct_takeover_hud()
+
+    async def _focus_human_takeover_window(self) -> None:
+        if self._headless:
+            return
+        page = self.page
+        if page is None:
+            return
+        with contextlib.suppress(Exception):
+            await page.bring_to_front()
+        with contextlib.suppress(Exception):
+            self.takeover_url = str(getattr(page, "url", "") or "") or None
 
     async def _start_stream_transport(self) -> None:
         assert self.page is not None
-        await self._stop_webrtc_capture_loop()
-        if self.stream_mode == "option_a":
+        await self._stop_stream_transport()
+        if (
+            self.runtime.state == SessionState.TAKEOVER
+            and self.takeover_mode == "direct"
+        ):
+            self._log_runtime_event(
+                "stream_transport_skip_direct_takeover",
+                runtime_state=self.runtime.state.value,
+                takeover_mode=self.takeover_mode,
+            )
+            return
+        effective_stream_mode = self._effective_stream_mode()
+        if effective_stream_mode == "none":
+            return
+        if effective_stream_mode == "option_a":
             if self.live_streamer is not None:
                 await self.live_streamer.stop()
                 self.live_streamer = None
@@ -1774,6 +2016,11 @@ class PlaywrightNativeConnector(AdapterConnector):
                 self.page,
                 self.runtime.emit_frame,
                 profile_config=self.stream_profile,
+                interval_seconds=(
+                    max(self.stream_profile.screenshot_interval_seconds, 0.2)
+                    if not self._headless
+                    else None
+                ),
             )
             await self.option_a_streamer.start()
             return
@@ -1788,9 +2035,12 @@ class PlaywrightNativeConnector(AdapterConnector):
             profile_config=self.stream_profile,
         )
         await self.live_streamer.start()
-        self.live_stream_health_task = asyncio.create_task(
-            self._watch_live_stream_health()
-        )
+        if self._headless:
+            self.live_stream_health_task = asyncio.create_task(
+                self._watch_live_stream_health()
+            )
+        else:
+            self.live_stream_health_task = None
 
     async def _watch_live_stream_health(self) -> None:
         if self.live_streamer is None:
@@ -1799,6 +2049,8 @@ class PlaywrightNativeConnector(AdapterConnector):
         await self._switch_to_option_a()
 
     async def _switch_to_option_a(self) -> None:
+        if not self._headless:
+            return
         if self.stream_mode == "option_a":
             return
         self.stream_mode = "option_a"
@@ -1811,8 +2063,138 @@ class PlaywrightNativeConnector(AdapterConnector):
             self.page,
             self.runtime.emit_frame,
             profile_config=self.stream_profile,
+            interval_seconds=(
+                max(self.stream_profile.screenshot_interval_seconds, 0.2)
+                if not self._headless
+                else None
+            ),
         )
         await self.option_a_streamer.start()
+
+    async def _launch_browser_with_retry(
+        self, *, headless_override: bool | None, attempts: int = 4
+    ) -> None:
+        last_error: Exception | None = None
+        for attempt in range(max(attempts, 1)):
+            self._log_runtime_event(
+                "launch_browser_attempt",
+                attempt=attempt + 1,
+                attempts=max(attempts, 1),
+                headless_override=headless_override,
+            )
+            try:
+                await self._launch_browser(headless_override=headless_override)
+                self._log_runtime_event(
+                    "launch_browser_attempt_success",
+                    attempt=attempt + 1,
+                    headless=self._headless,
+                    takeover_mode=self.takeover_mode,
+                )
+                return
+            except Exception as exc:  # pragma: no cover - runtime safety path
+                last_error = exc
+                self._log_runtime_event(
+                    "launch_browser_attempt_failed",
+                    attempt=attempt + 1,
+                    error=str(exc),
+                    headless_override=headless_override,
+                )
+                if attempt + 1 >= max(attempts, 1):
+                    raise
+                await asyncio.sleep(0.25 * (attempt + 1))
+                with contextlib.suppress(Exception):
+                    await self._close_browser_runtime(stop_playwright=False)
+        if last_error is not None:  # pragma: no cover - defensive
+            raise last_error
+
+    async def _ensure_browser_runtime_launched(
+        self, *, headless: bool, start_stream_transport: bool = True
+    ) -> None:
+        self._log_runtime_event(
+            "ensure_browser_runtime_begin",
+            requested_headless=headless,
+            start_stream_transport=start_stream_transport,
+            current_headless=self._headless,
+            runtime_state=self.runtime.state.value,
+            takeover_mode=self.takeover_mode,
+            has_browser=self.browser is not None,
+            has_context=self.context is not None,
+            has_page=self.page is not None,
+            has_action_layer=self.action_layer is not None,
+        )
+        async with self.browser_lifecycle_lock:
+            browser_running = (
+                self.playwright is not None
+                and self.browser is not None
+                and self.context is not None
+                and self.page is not None
+                and self.action_layer is not None
+            )
+            self._log_runtime_event(
+                "ensure_browser_runtime_locked",
+                browser_running=browser_running,
+                requested_headless=headless,
+                current_headless=self._headless,
+                takeover_mode=self.takeover_mode,
+            )
+            if browser_running:
+                if self._headless == headless:
+                    if (
+                        start_stream_transport
+                        and self.live_streamer is None
+                        and self.option_a_streamer is None
+                    ):
+                        await self._start_stream_transport()
+                    self._log_runtime_event(
+                        "ensure_browser_runtime_noop",
+                        requested_headless=headless,
+                        current_headless=self._headless,
+                    )
+                    return
+                previous_url = str(self.current_page_url or "").strip() or None
+                previous_takeover_mode = self.takeover_mode
+                self._log_runtime_event(
+                    "ensure_browser_runtime_relaunch",
+                    previous_url=previous_url,
+                    previous_takeover_mode=previous_takeover_mode,
+                    requested_headless=headless,
+                )
+                self._runtime_relaunching = True
+                try:
+                    await self._close_browser_runtime(stop_playwright=False)
+                    await asyncio.sleep(0.2)
+                    await self._launch_browser_with_retry(headless_override=headless)
+                    self.takeover_mode = previous_takeover_mode
+                    if start_stream_transport:
+                        await self._start_stream_transport()
+                    if previous_url and self.page is not None:
+                        with contextlib.suppress(Exception):
+                            await self.page.goto(
+                                previous_url, wait_until="domcontentloaded"
+                            )
+                            await self._sync_page_version(force=False)
+                    self._log_runtime_event(
+                        "ensure_browser_runtime_relaunch_done",
+                        takeover_mode=self.takeover_mode,
+                        headless=self._headless,
+                        takeover_url=self.takeover_url,
+                    )
+                finally:
+                    self._runtime_relaunching = False
+                return
+            self._runtime_relaunching = True
+            try:
+                await self._launch_browser_with_retry(headless_override=headless)
+                if start_stream_transport:
+                    await self._start_stream_transport()
+                self._log_runtime_event(
+                    "ensure_browser_runtime_launch_done",
+                    takeover_mode=self.takeover_mode,
+                    headless=self._headless,
+                    takeover_url=self.takeover_url,
+                )
+            finally:
+                self._runtime_relaunching = False
 
     async def _stop_webrtc_capture_loop(self) -> None:
         if self.live_stream_health_task is None:
@@ -1823,7 +2205,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    async def _shutdown_browser(self) -> None:
+    async def _stop_stream_transport(self) -> None:
         await self._stop_webrtc_capture_loop()
         if self.live_streamer is not None:
             await self.live_streamer.stop()
@@ -1831,16 +2213,28 @@ class PlaywrightNativeConnector(AdapterConnector):
         if self.option_a_streamer is not None:
             await self.option_a_streamer.stop()
             self.option_a_streamer = None
+
+    async def _shutdown_browser(self) -> None:
+        await self._close_browser_runtime(stop_playwright=True)
+
+    async def _close_browser_runtime(self, *, stop_playwright: bool) -> None:
+        self._direct_takeover_hud_installed = False
+        self.takeover_mode = "remote"
+        self._headless = True
+        self.capabilities["supports_direct_takeover"] = False
+        await self._stop_stream_transport()
         if self.context is not None:
             await self.context.close()
             self.context = None
         if self.browser is not None:
             await self.browser.close()
             self.browser = None
-        if self.playwright is not None:
+        if stop_playwright and self.playwright is not None:
             await self.playwright.stop()
             self.playwright = None
         self.page = None
+        self.action_layer = None
+        self.takeover_url = None
         self.cdp_session = None
 
     async def _wait_for_run_permission(self) -> None:
@@ -2030,6 +2424,19 @@ class PlaywrightNativeConnector(AdapterConnector):
             SessionState.PAUSED,
         }
 
+    @staticmethod
+    def _normalize_takeover_mode_preference(
+        mode_preference: str | None,
+    ) -> Literal["remote", "direct"] | None:
+        if not isinstance(mode_preference, str):
+            return None
+        normalized = mode_preference.strip().lower()
+        if normalized == "direct":
+            return "direct"
+        if normalized == "remote":
+            return "remote"
+        return None
+
     async def remote_mouse_move(self, x: float, y: float) -> None:
         if not self._can_remote_control() or not self.page:
             return
@@ -2067,10 +2474,46 @@ class PlaywrightNativeConnector(AdapterConnector):
             return
         await self.page.keyboard.up(key)
 
-    async def start_takeover(self) -> None:
+    async def start_takeover(self, mode_preference: str | None = None) -> None:
         if self.runtime.state == SessionState.TAKEOVER:
             await self.runtime.emit_session_state()
             return
+        requested_mode = self._normalize_takeover_mode_preference(mode_preference)
+        self._log_runtime_event(
+            "start_takeover_request",
+            mode_preference=mode_preference,
+            normalized_mode=requested_mode,
+            takeover_mode_before=self.takeover_mode,
+            runtime_state=self.runtime.state.value,
+            headless=self._headless,
+            supports_direct_takeover=self.capabilities.get("supports_direct_takeover"),
+        )
+        if requested_mode is not None:
+            self.takeover_mode = requested_mode
+        if self.takeover_mode == "direct" and self._headless:
+            try:
+                async with self.command_lock:
+                    await self._ensure_browser_runtime_launched(
+                        headless=False,
+                        start_stream_transport=False,
+                    )
+            except Exception as exc:
+                await self.runtime.emit_error(
+                    ErrorCode.INVALID_STATE,
+                    f"Unable to launch direct takeover browser: {exc}",
+                    command_type="start_takeover",
+                )
+                self.takeover_mode = "remote"
+                return
+            await self.runtime.emit_session_state()
+        self._log_runtime_event(
+            "start_takeover_mode_resolved",
+            requested_mode=requested_mode,
+            takeover_mode=self.takeover_mode,
+            headless=self._headless,
+            supports_direct_takeover=self.capabilities.get("supports_direct_takeover"),
+            takeover_url=self.takeover_url,
+        )
         current_state = self.runtime.state
         if self.runtime.state not in {
             SessionState.RUNNING,
@@ -2096,13 +2539,53 @@ class PlaywrightNativeConnector(AdapterConnector):
             resume_state=self.resume_state_after_takeover.value,
             checkpoint_id=self.latest_checkpoint_id,
             current_url=self.current_page_url,
+            takeover_mode=self.takeover_mode,
         )
+        await self._sync_takeover_page_reference()
+        if self.takeover_mode == "direct":
+            await self._install_direct_takeover_hud()
+            await self._stop_stream_transport()
+        await self._focus_human_takeover_window()
+        if self.takeover_mode == "remote" and self.page is not None:
+            # Remote takeover still renders inside Lumon. Emit a fresh frame and
+            # browser context at takeover entry so the stage does not show a
+            # blank shell after switching from direct control back to in-app UI.
+            with contextlib.suppress(Exception):
+                await self._sync_page_version(force=False)
+            with contextlib.suppress(Exception):
+                await self._emit_snapshot_frame()
+            if self.current_page_url:
+                with contextlib.suppress(Exception):
+                    await self.runtime.emit_browser_context_update(
+                        {
+                            "session_id": self.runtime.session_id,
+                            "adapter_id": self.adapter_id,
+                            "adapter_run_id": self.adapter_run_id,
+                            "timestamp": self.runtime.timestamp(),
+                            "url": self.current_page_url,
+                            "title": None,
+                            "domain": urllib.parse.urlparse(
+                                self.current_page_url
+                            ).hostname
+                            or "unknown",
+                            "environment_type": infer_environment_type(
+                                self.current_page_url
+                            ).value,
+                        }
+                    )
         if self.runtime.state == SessionState.WAITING_FOR_APPROVAL:
             self.suspended_checkpoint_id = self.latest_checkpoint_id
             if self.approval_future and not self.approval_future.done():
                 self.approval_future.set_result(False)
         await self.runtime.transition_to(
             SessionState.TAKEOVER, checkpoint_id=self.latest_checkpoint_id
+        )
+        self._log_runtime_event(
+            "start_takeover_transitioned",
+            runtime_state=self.runtime.state.value,
+            takeover_mode=self.takeover_mode,
+            takeover_url=self.takeover_url,
+            headless=self._headless,
         )
 
     async def end_takeover(self) -> None:
@@ -2123,9 +2606,78 @@ class PlaywrightNativeConnector(AdapterConnector):
             to_state=target_state.value,
             stale_checkpoint_id=stale_checkpoint_id,
             current_url=self.current_page_url,
+            takeover_mode=self.takeover_mode,
         )
+        if self.takeover_mode == "direct":
+            await self._remove_direct_takeover_hud()
+            preserve_url = (
+                str(self.takeover_url or self.current_page_url or "").strip() or None
+            )
+            relaunched_remote = False
+            try:
+                await self._close_browser_runtime(stop_playwright=False)
+                await self._ensure_browser_runtime_launched(
+                    headless=True,
+                    start_stream_transport=True,
+                )
+                relaunched_remote = True
+            except Exception as exc:
+                await self.runtime.emit_error(
+                    ErrorCode.INVALID_STATE,
+                    (
+                        "Unable to restore Lumon browser runtime after direct takeover: "
+                        f"{exc}"
+                    ),
+                    command_type="end_takeover",
+                )
+            if relaunched_remote and preserve_url and self.page is not None:
+                with contextlib.suppress(Exception):
+                    await self.page.goto(preserve_url, wait_until="domcontentloaded")
+                    await self._sync_page_version(force=False)
+            if relaunched_remote:
+                with contextlib.suppress(Exception):
+                    await self._emit_snapshot_frame()
+            self.takeover_mode = "remote"
+            self._log_runtime_event(
+                "direct_takeover_return_to_remote",
+                restored_url=self.takeover_url,
+                current_url=self.current_page_url,
+                headless=self._headless,
+                runtime_state=target_state.value,
+            )
+        else:
+            if self.page is not None and self.current_page_url:
+                with contextlib.suppress(Exception):
+                    await self.runtime.emit_browser_context_update(
+                        {
+                            "session_id": self.runtime.session_id,
+                            "adapter_id": self.adapter_id,
+                            "adapter_run_id": self.adapter_run_id,
+                            "timestamp": self.runtime.timestamp(),
+                            "url": self.current_page_url,
+                            "title": None,
+                            "domain": urllib.parse.urlparse(
+                                self.current_page_url
+                            ).hostname
+                            or "unknown",
+                            "environment_type": infer_environment_type(
+                                self.current_page_url
+                            ).value,
+                        }
+                    )
+            if self.page is not None:
+                # On remote return-control, force a fresh stage frame so Lumon
+                # can immediately render the page instead of waiting for the
+                # next transport tick.
+                with contextlib.suppress(Exception):
+                    await self._sync_page_version(force=False)
+                with contextlib.suppress(Exception):
+                    await self._emit_snapshot_frame()
         await self.runtime.transition_to(target_state, checkpoint_id=None)
         if target_state == SessionState.RUNNING:
+            request_resume_intent = getattr(self.runtime, "request_resume_intent", None)
+            if callable(request_resume_intent):
+                request_resume_intent(reason="takeover_returned_control")
             self.resume_event.set()
         if stale_checkpoint_id:
             await self.runtime.emit_error(

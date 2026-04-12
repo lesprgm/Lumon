@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import sys
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -13,14 +12,18 @@ from fastapi.websockets import WebSocketState
 from starlette.status import WS_1008_POLICY_VIOLATION
 
 from app.adapters.registry import create_connector
-from app.config import DEFAULT_ADAPTER_ID, PROTOCOL_VERSION, RUNTIME_VERSION
+from app.config import (
+    DEFAULT_ADAPTER_ID,
+    FRONTEND_RUNTIME_FEATURES,
+    PROTOCOL_VERSION,
+    RUNTIME_VERSION,
+)
 from app.optional.langsmith_bridge import (
     OptionalTraceBridgeMapper,
     optional_tracing_enabled,
 )
 from app.protocol.enums import ErrorCode, SessionState
 from app.protocol.models import (
-    AttachObserverPayload,
     BrowserCommandRecord,
     BrowserCommandRequest,
     BrowserCommandResult,
@@ -33,7 +36,6 @@ from app.protocol.models import (
 )
 from app.session.artifacts import SessionArtifactRecorder
 from app.session.opencode_attach import OpenCodeAttachService
-from app.streaming.stream_profile import resolve_stream_profile
 from app.protocol.validation import (
     ProtocolValidationError,
     validate_client_message,
@@ -65,7 +67,7 @@ def drop_frames_when_webrtc_ready() -> bool:
     value = os.getenv("LUMON_DISABLE_FRAME_STREAM_ON_WEBRTC")
     if value is None:
         return True
-    return value.strip().lower() not in {"0", "false", "no", "off"}
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def normalize_opencode_web_mode(
@@ -109,10 +111,12 @@ class SessionRuntime:
         self.observer_mode = False
         self.web_mode: str | None = None
         self.web_bridge: str | None = None
+        self.sprite_family = "lobster"
         self.task_text = ""
         self.state = SessionState.IDLE
         self.active_checkpoint_id: str | None = None
         self._connections: set[WebSocket] = set()
+        self._has_connected_once = False
         self._lock = asyncio.Lock()
         self._next_optional_event_seq = 1
         self._optional_trace_mapper = OptionalTraceBridgeMapper()
@@ -144,7 +148,19 @@ class SessionRuntime:
         self._webrtc_session: WebRTCSession | None = None
         self._latest_webrtc_offer_payload: dict[str, Any] | None = None
         self._webrtc_ready = False
-        self._has_seen_ui_connection = False
+        self._ui_visible: bool | None = None
+        self._resume_intent_seq = 0
+        self._resume_intent_consumed_seq = 0
+        self._resume_intent_reason: str | None = None
+        self._resume_intent_requested_at: str | None = None
+
+    @property
+    def connection_count(self) -> int:
+        return len(self._connections)
+
+    @property
+    def latest_frame_seq(self) -> int | None:
+        return self._latest_frame_seq
 
     @property
     def latest_frame_generation(self) -> int:
@@ -155,12 +171,8 @@ class SessionRuntime:
         return self._latest_command_frame_generation
 
     @property
-    def latest_frame_seq(self) -> int | None:
-        return self._latest_frame_seq
-
-    @property
-    def connection_count(self) -> int:
-        return len(self._connections)
+    def latest_frame_payload(self) -> dict[str, Any] | None:
+        return self._latest_frame_payload
 
     def is_terminal(self) -> bool:
         return self.state in TERMINAL_STATES
@@ -171,11 +183,12 @@ class SessionRuntime:
     async def connect(self, websocket: WebSocket) -> None:
         self._cancel_disconnect_task()
         had_connections = bool(self._connections)
+        is_reconnect = self._has_connected_once and not had_connections
         await websocket.accept()
         self._connections.add(websocket)
-        if self._has_seen_ui_connection and not had_connections:
+        if is_reconnect:
             self._artifact.note_reconnect()
-        self._has_seen_ui_connection = True
+        self._has_connected_once = True
         await self.emit_session_state(websocket)
         await self._replay_live_state(websocket)
 
@@ -198,26 +211,6 @@ class SessionRuntime:
 
         message_type = validated["type"]
         payload = validated["payload"]
-        if diagnostics_enabled() or message_type in {
-            "start_takeover",
-            "end_takeover",
-            "approve",
-            "reject",
-        }:
-            print(
-                (
-                    "[lumon] client_message "
-                    f"session_id={self.session_id} "
-                    f"type={message_type} "
-                    f"state={self.state.value} "
-                    f"checkpoint_id={self.active_checkpoint_id!r} "
-                    f"payload={payload!r}"
-                ),
-                file=sys.stderr,
-                flush=True,
-            )
-        pending_intervention_resolution: tuple[str, str] | None = None
-        handler = None
         async with self._lock:
             if message_type == "start_task":
                 if self.state not in TERMINAL_STATES:
@@ -250,6 +243,10 @@ class SessionRuntime:
                 self._active_approval_payload = None
                 self._active_bridge_payload = None
                 self._recent_browser_command_payloads.clear()
+                self._resume_intent_seq = 0
+                self._resume_intent_consumed_seq = 0
+                self._resume_intent_reason = None
+                self._resume_intent_requested_at = None
                 self._artifact = SessionArtifactRecorder(
                     session_id=self.session_id,
                     adapter_id=self.adapter_id,
@@ -281,16 +278,76 @@ class SessionRuntime:
                 return
 
             if message_type == "ui_ready":
-                self._artifact.note_ui_ready(self.timestamp())
-                await self._handle_ui_ready(payload)
+                timestamp = self.timestamp()
+                self._artifact.note_ui_ready(timestamp)
+                runtime_version = payload.get("runtime_version")
+                supports_ui_telemetry = payload.get("supports_ui_telemetry")
+                supports_ui_ready_handshake = payload.get("supports_ui_ready_handshake")
+                handshake_payload: dict[str, Any] = {
+                    "timestamp": timestamp,
+                    "session_id": self.session_id,
+                    "runtime_version": runtime_version,
+                    "expected_runtime_version": RUNTIME_VERSION,
+                    "supports_ui_telemetry": supports_ui_telemetry,
+                    "supports_ui_ready_handshake": supports_ui_ready_handshake,
+                }
+                stale_reason: str | None = None
+                if (
+                    isinstance(runtime_version, str)
+                    and runtime_version
+                    and runtime_version != RUNTIME_VERSION
+                ):
+                    stale_reason = (
+                        "Lumon frontend build is stale. Run `./lumon restart` "
+                        "so the served UI matches the backend runtime."
+                    )
+                else:
+                    handshake_capable = (
+                        supports_ui_telemetry is not None
+                        or supports_ui_ready_handshake is not None
+                        or isinstance(runtime_version, str)
+                    )
+                    missing_features: list[str] = []
+                    if handshake_capable:
+                        if (
+                            FRONTEND_RUNTIME_FEATURES.get("ui_telemetry") is True
+                            and supports_ui_telemetry is not True
+                        ):
+                            missing_features.append("ui_telemetry")
+                        if (
+                            FRONTEND_RUNTIME_FEATURES.get("ui_ready_handshake") is True
+                            and supports_ui_ready_handshake is not True
+                        ):
+                            missing_features.append("ui_ready_handshake")
+                    if missing_features:
+                        handshake_payload["missing_features"] = missing_features
+                        stale_reason = (
+                            "Lumon frontend build is missing required runtime features. "
+                            "Run `./lumon restart` so the served UI matches the backend runtime."
+                        )
+                self._artifact.append_event(
+                    {"type": "ui_handshake", "payload": handshake_payload}
+                )
+                if stale_reason is not None:
+                    await self.emit_error(
+                        ErrorCode.INVALID_STATE,
+                        stale_reason,
+                        command_type=message_type,
+                    )
                 return
 
-            if message_type == "ui_telemetry":
-                self.record_ui_telemetry(UiTelemetryPayload.model_validate(payload))
+            if message_type == "set_sprite_family":
+                self.sprite_family = (
+                    "dog" if payload.get("family") == "dog" else "lobster"
+                )
+                set_sprite_family = getattr(self._connector, "set_sprite_family", None)
+                if set_sprite_family is not None:
+                    await set_sprite_family(self.sprite_family)
+                await self.emit_session_state()
                 return
 
             if message_type == "webrtc_request":
-                await self._start_webrtc(payload)
+                await self._start_webrtc()
                 return
 
             if message_type == "webrtc_answer":
@@ -313,38 +370,16 @@ class SessionRuntime:
                     return
                 return
 
-            if (
-                message_type == "approve"
-                and self._active_approval_intervention_id is not None
-            ):
-                pending_intervention_resolution = (
-                    self._active_approval_intervention_id,
-                    "approved",
-                )
-            elif (
-                message_type == "reject"
-                and self._active_approval_intervention_id is not None
-            ):
-                pending_intervention_resolution = (
-                    self._active_approval_intervention_id,
-                    "denied",
-                )
-            elif (
-                message_type == "accept_bridge"
-                and self._active_bridge_intervention_id is not None
-            ):
-                pending_intervention_resolution = (
-                    self._active_bridge_intervention_id,
-                    "approved",
-                )
-            elif (
-                message_type == "decline_bridge"
-                and self._active_bridge_intervention_id is not None
-            ):
-                pending_intervention_resolution = (
-                    self._active_bridge_intervention_id,
-                    "dismissed",
-                )
+            approval_intervention_id = (
+                self._active_approval_intervention_id
+                if message_type in {"approve", "reject"}
+                else None
+            )
+            bridge_intervention_id = (
+                self._active_bridge_intervention_id
+                if message_type in {"accept_bridge", "decline_bridge"}
+                else None
+            )
 
             handler = getattr(self._connector, message_type, None)
             if handler is None:
@@ -354,34 +389,78 @@ class SessionRuntime:
                     command_type=message_type,
                 )
                 return
-        handler_result = await handler(**payload)
-        async with self._lock:
-            if pending_intervention_resolution is None or handler_result is False:
-                return
-            if isinstance(handler_result, dict):
-                result_status = str(handler_result.get("status") or "")
-                result_reason = str(handler_result.get("reason") or "")
-                if result_status in {"failed", "unsupported"}:
-                    return
-                if result_status == "blocked" and result_reason == "awaiting_approval":
-                    return
-            if handler_result is None:
-                return
-            intervention_id, resolution = pending_intervention_resolution
-            self._artifact.resolve_intervention(
-                intervention_id, resolution=resolution, resolved_at=self.timestamp()
-            )
-            if message_type in {"approve", "reject"}:
-                self._active_approval_intervention_id = None
-                self._active_approval_payload = None
-            else:
-                self._active_bridge_intervention_id = None
-                self._active_bridge_payload = None
+            handler_result = await handler(**payload)
+
+            if (
+                message_type == "approve"
+                and approval_intervention_id is not None
+                and self._intervention_action_succeeded(handler_result)
+            ):
+                self._artifact.resolve_intervention(
+                    approval_intervention_id,
+                    resolution="approved",
+                    resolved_at=self.timestamp(),
+                )
+                if self._active_approval_intervention_id == approval_intervention_id:
+                    self._active_approval_intervention_id = None
+                    self._active_approval_payload = None
+            elif (
+                message_type == "reject"
+                and approval_intervention_id is not None
+                and self._intervention_action_succeeded(handler_result)
+            ):
+                self._artifact.resolve_intervention(
+                    approval_intervention_id,
+                    resolution="denied",
+                    resolved_at=self.timestamp(),
+                )
+                if self._active_approval_intervention_id == approval_intervention_id:
+                    self._active_approval_intervention_id = None
+                    self._active_approval_payload = None
+            elif (
+                message_type == "accept_bridge"
+                and bridge_intervention_id is not None
+                and self._intervention_action_succeeded(handler_result)
+            ):
+                self._artifact.resolve_intervention(
+                    bridge_intervention_id,
+                    resolution="approved",
+                    resolved_at=self.timestamp(),
+                )
+                if self._active_bridge_intervention_id == bridge_intervention_id:
+                    self._active_bridge_intervention_id = None
+                    self._active_bridge_payload = None
+            elif (
+                message_type == "decline_bridge"
+                and bridge_intervention_id is not None
+                and self._intervention_action_succeeded(handler_result)
+            ):
+                self._artifact.resolve_intervention(
+                    bridge_intervention_id,
+                    resolution="dismissed",
+                    resolved_at=self.timestamp(),
+                )
+                if self._active_bridge_intervention_id == bridge_intervention_id:
+                    self._active_bridge_intervention_id = None
+                    self._active_bridge_payload = None
+
+    @staticmethod
+    def _intervention_action_succeeded(result: Any) -> bool:
+        if isinstance(result, bool):
+            return result
+        if isinstance(result, dict):
+            status = str(result.get("status") or "").strip().lower()
+            if status:
+                return status not in {"failed", "error"}
+            return True
+        if result is None:
+            return True
+        return bool(result)
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         validated = validate_server_message(message)
         stale: list[WebSocket] = []
-        for websocket in tuple(self._connections):
+        for websocket in list(self._connections):
             if websocket.application_state != WebSocketState.CONNECTED:
                 stale.append(websocket)
                 continue
@@ -410,8 +489,11 @@ class SessionRuntime:
             "observer_mode": self.observer_mode,
             "web_mode": self.web_mode,
             "web_bridge": self.web_bridge,
+            "sprite_family": self.sprite_family,
             "state": self.state.value,
             "interaction_mode": interaction_mode_for_state(self.state).value,
+            "takeover_mode": getattr(self._connector, "takeover_mode", None),
+            "takeover_url": getattr(self._connector, "takeover_url", None),
             "active_checkpoint_id": self.active_checkpoint_id,
             "task_text": self.task_text,
             "viewport": {"width": 1280, "height": 800},
@@ -427,26 +509,49 @@ class SessionRuntime:
         payload_copy = dict(payload)
         skip_webrtc = bool(payload_copy.pop("__skip_webrtc", False))
         command_snapshot = bool(payload_copy.pop("__command_snapshot", False))
+        force_ui_broadcast = bool(payload_copy.pop("__force_ui_broadcast", False))
+        if self._webrtc_session is not None:
+            mime_type = str(payload_copy.get("mime_type") or "")
+            data_base64 = str(payload_copy.get("data_base64") or "")
+            if not skip_webrtc and mime_type and data_base64:
+                self._webrtc_session.push_frame(mime_type, data_base64)
+        if "mime_type" in payload_copy and "data_base64" in payload_copy:
+            self._artifact.record_frame(
+                str(payload_copy["mime_type"]), str(payload_copy["data_base64"])
+            )
+            frame_timestamp = payload_copy.get("timestamp")
+            if not isinstance(frame_timestamp, str) or not frame_timestamp:
+                frame_timestamp = self.timestamp()
+            self._artifact.note_first_frame(frame_timestamp)
         self._latest_frame_generation += 1
         if command_snapshot:
             self._latest_command_frame_generation += 1
         frame_seq = payload_copy.get("frame_seq")
         if isinstance(frame_seq, int):
             self._latest_frame_seq = frame_seq
-        if "mime_type" in payload_copy and "data_base64" in payload_copy:
-            frame_timestamp = str(payload_copy.get("timestamp") or self.timestamp())
-            self._artifact.note_first_frame(frame_timestamp)
-            self._artifact.record_frame(
-                str(payload_copy["mime_type"]), str(payload_copy["data_base64"])
-            )
+        elif self._latest_frame_seq is None:
+            self._latest_frame_seq = 1
+        else:
+            self._latest_frame_seq += 1
         self._latest_frame_payload = dict(payload_copy)
-        if self._webrtc_session is not None:
-            mime_type = str(payload_copy.get("mime_type") or "")
-            data_base64 = str(payload_copy.get("data_base64") or "")
-            if not skip_webrtc and mime_type and data_base64:
-                self._webrtc_session.push_frame(mime_type, data_base64)
-        if drop_frames_when_webrtc_ready() and self._webrtc_ready and not skip_webrtc:
+        takeover_mode = getattr(self._connector, "takeover_mode", None)
+        if (
+            drop_frames_when_webrtc_ready()
+            and self._webrtc_ready
+            and not skip_webrtc
+            and takeover_mode != "direct"
+        ):
             return
+        should_throttle_hidden = (
+            takeover_mode == "direct"
+            and self._ui_visible is False
+            and not force_ui_broadcast
+            and not command_snapshot
+        )
+        if should_throttle_hidden:
+            frame_seq = payload_copy.get("frame_seq")
+            if isinstance(frame_seq, int) and frame_seq % 4 != 0:
+                return
         await self.broadcast({"type": "frame", "payload": payload_copy})
 
     def push_webrtc_frame_bytes(self, mime_type: str, data: bytes) -> None:
@@ -461,23 +566,6 @@ class SessionRuntime:
             and payload_event_seq >= self._next_optional_event_seq
         ):
             self._next_optional_event_seq = payload_event_seq + 1
-        action_type = payload.get("action_type")
-        target_rect = payload.get("target_rect")
-        if diagnostics_enabled() or action_type == "type":
-            print(
-                (
-                    "[lumon] agent_event "
-                    f"session_id={payload.get('session_id') or self.session_id} "
-                    f"event_seq={payload.get('event_seq')} "
-                    f"action_type={action_type} "
-                    f"state={payload.get('state')} "
-                    f"target_rect={target_rect!r} "
-                    f"cursor={payload.get('cursor')!r} "
-                    f"summary={payload.get('summary_text')!r}"
-                ),
-                file=sys.stderr,
-                flush=True,
-            )
         self._artifact.append_event({"type": "agent_event", "payload": payload})
         await self.broadcast({"type": "agent_event", "payload": payload})
 
@@ -747,6 +835,7 @@ class SessionRuntime:
         self._manual_intervention_id = None
         self._active_approval_payload = None
         self._active_bridge_payload = None
+        self._resume_intent_consumed_seq = self._resume_intent_seq
         await self._close_webrtc()
         self._artifact.finalize(
             status=status, completed_at=self.timestamp(), summary_text=summary_text
@@ -808,7 +897,6 @@ class SessionRuntime:
         attach_payload = (
             payload if isinstance(payload, dict) else payload.model_dump(mode="json")
         )
-        attach_requested_at = self._artifact.metrics.attach_requested_at
         if self.state not in TERMINAL_STATES:
             await self.emit_error(
                 ErrorCode.INVALID_STATE,
@@ -831,10 +919,17 @@ class SessionRuntime:
         self._optional_trace_mapper = OptionalTraceBridgeMapper()
         self._optional_trace_history.clear()
         self._latest_frame_payload = None
+        self._latest_frame_seq = None
+        self._latest_frame_generation = 0
+        self._latest_command_frame_generation = 0
         self._latest_browser_context_payload = None
         self._active_approval_payload = None
         self._active_bridge_payload = None
         self._recent_browser_command_payloads.clear()
+        self._resume_intent_seq = 0
+        self._resume_intent_consumed_seq = 0
+        self._resume_intent_reason = None
+        self._resume_intent_requested_at = None
         self._artifact = SessionArtifactRecorder(
             session_id=self.session_id,
             adapter_id=self.adapter_id,
@@ -843,8 +938,6 @@ class SessionRuntime:
             observer_mode=True,
             started_at=self.timestamp(),
         )
-        if attach_requested_at is not None:
-            self._artifact.note_attach_requested(attach_requested_at)
         self.trace_id = new_id("trace")
         self._connector = create_connector(self, self.adapter_id)
         await self._connector.start_task(
@@ -856,6 +949,7 @@ class SessionRuntime:
             observer_mode=True,
             observed_session_id=attach_payload.get("observed_session_id"),
         )
+        self._artifact.note_attached(self.timestamp())
 
     def note_duplicate_attach_prevented(self) -> None:
         self._artifact.note_duplicate_attach_prevented()
@@ -887,27 +981,6 @@ class SessionRuntime:
     def record_browser_command(self, record: BrowserCommandRecord) -> None:
         self._artifact.append_command(record)
         payload = record.model_dump(mode="json")
-        if diagnostics_enabled() or record.command in {"open", "type"}:
-            evidence = payload.get("evidence") or {}
-            details = evidence.get("details") if isinstance(evidence, dict) else None
-            target_rect = (
-                details.get("target_rect") if isinstance(details, dict) else None
-            )
-            print(
-                (
-                    "[lumon] browser_command "
-                    f"session_id={self.session_id} "
-                    f"command={payload.get('command')} "
-                    f"command_id={payload.get('command_id')} "
-                    f"status={payload.get('status')} "
-                    f"reason={payload.get('reason')} "
-                    f"verified={evidence.get('verified') if isinstance(evidence, dict) else None} "
-                    f"target_rect={target_rect!r} "
-                    f"source_url={payload.get('source_url')!r}"
-                ),
-                file=sys.stderr,
-                flush=True,
-            )
         self._recent_browser_command_payloads.append(payload)
         self._artifact.append_event({"type": "browser_command", "payload": payload})
         with contextlib.suppress(RuntimeError):
@@ -915,6 +988,34 @@ class SessionRuntime:
             loop.create_task(
                 self.broadcast({"type": "browser_command", "payload": payload})
             )
+
+    def record_ui_telemetry(self, payload: UiTelemetryPayload) -> None:
+        timestamp = payload.timestamp or self.timestamp()
+        if payload.event == "video_quality_sample":
+            visibility_state = payload.meta.get("visibility_state")
+            hidden_meta = payload.meta.get("hidden")
+            if isinstance(hidden_meta, bool):
+                self._ui_visible = not hidden_meta
+            elif isinstance(visibility_state, str):
+                normalized_visibility = visibility_state.strip().lower()
+                if normalized_visibility in {"visible", "prerender"}:
+                    self._ui_visible = True
+                elif normalized_visibility in {"hidden", "unloaded"}:
+                    self._ui_visible = False
+        self._artifact.record_ui_telemetry(
+            event=payload.event,
+            timestamp=timestamp,
+            meta=payload.meta,
+        )
+        self._artifact.append_event(
+            {
+                "type": "ui_telemetry",
+                "payload": {
+                    **payload.model_dump(mode="json"),
+                    "timestamp": timestamp,
+                },
+            }
+        )
 
     def current_artifact(self) -> dict[str, Any]:
         artifact = self._artifact.current_artifact(
@@ -929,56 +1030,68 @@ class SessionRuntime:
             "commands": self._artifact.read_commands(),
         }
 
-    def record_ui_telemetry(self, payload: UiTelemetryPayload) -> None:
-        timestamp = payload.timestamp or self.timestamp()
-        details = dict(payload.meta)
-        self._artifact.record_ui_telemetry(
-            event=payload.event,
-            timestamp=timestamp,
-            meta=details,
-        )
+    def request_resume_intent(self, *, reason: str) -> dict[str, Any]:
+        self._resume_intent_seq += 1
+        self._resume_intent_reason = reason
+        self._resume_intent_requested_at = self.timestamp()
+        payload = {
+            "session_id": self.session_id,
+            "resume_intent_seq": self._resume_intent_seq,
+            "reason": reason,
+            "requested_at": self._resume_intent_requested_at,
+        }
         self._artifact.append_event(
-            {
-                "type": "ui_telemetry",
-                "payload": {
-                    "event": payload.event,
-                    "source": payload.source,
-                    "timestamp": timestamp,
-                    "meta": details,
-                },
-            }
+            {"type": "resume_intent_requested", "payload": payload}
         )
+        return payload
 
-    async def _handle_ui_ready(self, payload: dict[str, Any]) -> None:
-        runtime_version = payload.get("runtime_version")
-        supports_ui_telemetry = payload.get("supports_ui_telemetry") is True
-        supports_ui_ready_handshake = payload.get("supports_ui_ready_handshake") is True
-        compatible = (
-            runtime_version == RUNTIME_VERSION
-            and supports_ui_telemetry
-            and supports_ui_ready_handshake
-        )
-        self._artifact.append_event(
-            {
-                "type": "ui_handshake",
-                "payload": {
-                    "timestamp": self.timestamp(),
-                    "session_id": self.session_id,
-                    "runtime_version": runtime_version,
-                    "expected_runtime_version": RUNTIME_VERSION,
-                    "supports_ui_telemetry": supports_ui_telemetry,
-                    "supports_ui_ready_handshake": supports_ui_ready_handshake,
-                    "compatible": compatible,
-                },
+    def _pending_resume_intent_payload(self, *, after_seq: int = 0) -> dict[str, Any]:
+        pending_seq = self._resume_intent_seq
+        if pending_seq <= max(after_seq, self._resume_intent_consumed_seq):
+            return {
+                "session_id": self.session_id,
+                "pending": False,
+                "resume_intent_seq": pending_seq,
             }
-        )
-        if compatible:
-            return
-        await self.emit_error(
-            ErrorCode.INVALID_STATE,
-            "Lumon frontend build is stale or missing eval features. Run `./lumon restart` before trusting trust/clarity/latency data.",
-            command_type="ui_ready",
-        )
+        return {
+            "session_id": self.session_id,
+            "pending": True,
+            "resume_intent_seq": pending_seq,
+            "reason": self._resume_intent_reason,
+            "requested_at": self._resume_intent_requested_at,
+        }
+
+    def peek_resume_intent(self, *, after_seq: int = 0) -> dict[str, Any]:
+        return self._pending_resume_intent_payload(after_seq=after_seq)
+
+    def acknowledge_resume_intent(self, *, resume_intent_seq: int) -> dict[str, Any]:
+        bounded_target = min(max(0, int(resume_intent_seq)), self._resume_intent_seq)
+        if bounded_target > self._resume_intent_consumed_seq:
+            self._resume_intent_consumed_seq = bounded_target
+            self._artifact.append_event(
+                {
+                    "type": "resume_intent_acknowledged",
+                    "payload": {
+                        "session_id": self.session_id,
+                        "acknowledged_seq": bounded_target,
+                        "timestamp": self.timestamp(),
+                    },
+                }
+            )
+        return {
+            "session_id": self.session_id,
+            "resume_intent_seq": self._resume_intent_seq,
+            "consumed_seq": self._resume_intent_consumed_seq,
+            "acknowledged": self._resume_intent_consumed_seq >= int(resume_intent_seq),
+        }
+
+    def consume_resume_intent(self, *, after_seq: int = 0) -> dict[str, Any]:
+        payload = self._pending_resume_intent_payload(after_seq=after_seq)
+        if payload.get("pending") is True:
+            self.acknowledge_resume_intent(
+                resume_intent_seq=int(payload.get("resume_intent_seq") or 0)
+            )
+        return payload
 
     async def _replay_live_state(self, websocket: WebSocket) -> None:
         if self._latest_browser_context_payload is not None:
@@ -1025,7 +1138,7 @@ class SessionRuntime:
                 )
             )
 
-    async def _start_webrtc(self, payload: dict[str, Any] | None = None) -> None:
+    async def _start_webrtc(self) -> None:
         if not self._connector.capabilities.get("supports_frames", False):
             await self.emit_error(
                 ErrorCode.INVALID_STATE,
@@ -1033,11 +1146,7 @@ class SessionRuntime:
                 command_type="webrtc_request",
             )
             return
-        stream_profile = (payload or {}).get("stream_profile")
         await self._close_webrtc()
-        configure_stream_profile = getattr(self._connector, "set_stream_profile", None)
-        if configure_stream_profile is not None:
-            await configure_stream_profile(stream_profile)
         ice_servers = parse_ice_servers()
         self._webrtc_ready = False
 
@@ -1061,7 +1170,6 @@ class SessionRuntime:
             ice_servers=ice_servers,
             on_ice_candidate=on_ice_candidate,
             on_ready=on_ready,
-            profile_config=resolve_stream_profile(stream_profile),
         )
         offer = await self._webrtc_session.create_offer()
         offer_payload = {
@@ -1099,6 +1207,7 @@ class SessionManager:
         *,
         allowed_origins: tuple[str, ...],
         disconnect_grace_seconds: float = DEFAULT_DISCONNECT_GRACE_SECONDS,
+        bootstrap_session_ttl_seconds: float | None = None,
     ) -> None:
         self._allowed_origins = set(allowed_origins)
         self._sessions: dict[str, SessionRuntime] = {}
@@ -1106,10 +1215,13 @@ class SessionManager:
         self._opencode_attach = OpenCodeAttachService()
         self._lock = asyncio.Lock()
         self._disconnect_grace_seconds = disconnect_grace_seconds
+        self._bootstrap_session_ttl_seconds = bootstrap_session_ttl_seconds
+        self._bootstrap_expiry_tasks: dict[str, asyncio.Task[None]] = {}
 
     def create_session(self) -> dict[str, str]:
         runtime = self._new_runtime()
         self._sessions[runtime.session_id] = runtime
+        self._schedule_bootstrap_expiry(runtime.session_id)
         return {"session_id": runtime.session_id, "ws_token": runtime.join_token}
 
     def session_exists(self, session_id: str) -> bool:
@@ -1154,10 +1266,15 @@ class SessionManager:
             self._validate_origin(websocket)
             runtime = self._resolve_runtime(websocket)
         except WebSocketException as exc:
-            with contextlib.suppress(RuntimeError):
+            with contextlib.suppress(Exception):
                 await websocket.accept()
-                await websocket.close(code=exc.code, reason=exc.reason)
+            with contextlib.suppress(Exception):
+                await websocket.close(
+                    code=int(getattr(exc, "code", WS_1008_POLICY_VIOLATION)),
+                    reason=str(getattr(exc, "reason", "WebSocket policy violation")),
+                )
             return
+        self._cancel_bootstrap_expiry(runtime.session_id)
         async with self._lock:
             self._socket_sessions[websocket] = runtime.session_id
         await runtime.connect(websocket)
@@ -1185,7 +1302,7 @@ class SessionManager:
             runtime, already_attached = self._opencode_attach.prepare_runtime(
                 payload, self._sessions, self._new_runtime
             )
-            runtime._artifact.note_attach_requested(runtime.timestamp())
+            attach_requested_at = runtime.timestamp()
             if already_attached:
                 runtime.note_duplicate_attach_prevented()
 
@@ -1202,6 +1319,7 @@ class SessionManager:
                         payload, self._sessions, runtime
                     )
                 raise
+            runtime._artifact.note_attach_requested(attach_requested_at)
         runtime._artifact.note_attached(runtime.timestamp())
 
         return self._opencode_attach.build_attach_response(
@@ -1228,7 +1346,7 @@ class SessionManager:
             runtime, already_attached = self._opencode_attach.prepare_runtime(
                 attach_payload, self._sessions, self._new_runtime
             )
-            runtime._artifact.note_attach_requested(runtime.timestamp())
+            attach_requested_at = runtime.timestamp()
 
         if not already_attached:
             try:
@@ -1243,89 +1361,23 @@ class SessionManager:
                         attach_payload, self._sessions, runtime
                     )
                 raise
+            runtime._artifact.note_attach_requested(attach_requested_at)
         runtime._artifact.note_attached(runtime.timestamp())
-        should_record_result = False
-        try:
+        async with runtime._lock:
             await runtime.ensure_opencode_browser_delegate(
                 observed_session_id=payload.observed_session_id,
                 task_text=payload.task_text or runtime.task_text,
             )
             result = await runtime.execute_browser_command(payload)
-        except RuntimeError as exc:
-            result = BrowserCommandResult(
-                command_id=payload.command_id,
-                command=payload.command,
-                status="failed",
-                summary_text="Lumon could not prepare the live browser delegate.",
-                reason=str(exc) or "delegate_unavailable",
-                session_id=runtime.session_id,
-                source_url=None,
-                domain=None,
-                page_version=None,
-                evidence=None,
-                actionable_elements=[],
-                intervention_id=None,
-                checkpoint_id=None,
-                meta={"error": str(exc)},
-            ).model_dump(mode="json")
-            should_record_result = True
         validated = BrowserCommandResult.model_validate(
             {
                 **result,
                 "session_id": runtime.session_id,
                 "open_url": self._build_frontend_open_url(frontend_origin, runtime),
                 "already_attached": already_attached,
-                "ui_connected": bool(runtime.connection_count),
-                "ui_ready_at": runtime._artifact.metrics.ui_ready_at,
             }
         ).model_dump(mode="json")
-        if should_record_result:
-            runtime.record_browser_command(
-                BrowserCommandRecord(
-                    command_id=validated["command_id"],
-                    command=validated["command"],
-                    status=validated["status"],
-                    summary_text=validated["summary_text"],
-                    timestamp=runtime.timestamp(),
-                    reason=validated.get("reason"),
-                    source_url=validated.get("source_url"),
-                    domain=validated.get("domain"),
-                    page_version=validated.get("page_version"),
-                    evidence=validated.get("evidence"),
-                    actionable_elements=validated.get("actionable_elements") or [],
-                    intervention_id=validated.get("intervention_id"),
-                    checkpoint_id=validated.get("checkpoint_id"),
-                    meta=validated.get("meta") or {},
-                )
-            )
         return validated
-
-    async def resolve_local_checkpoint(
-        self,
-        session_id: str,
-        checkpoint_id: str,
-        *,
-        approve: bool,
-    ) -> dict[str, Any]:
-        runtime = self._sessions.get(session_id)
-        if runtime is None:
-            raise KeyError(session_id)
-        await runtime.handle_client_message(
-            {
-                "type": "approve" if approve else "reject",
-                "payload": {"checkpoint_id": checkpoint_id},
-            }
-        )
-        return runtime.current_artifact()
-
-    def record_local_ui_telemetry(
-        self, session_id: str, payload: UiTelemetryPayload
-    ) -> dict[str, Any]:
-        runtime = self._sessions.get(session_id)
-        if runtime is None:
-            raise KeyError(session_id)
-        runtime.record_ui_telemetry(payload)
-        return runtime.current_artifact()
 
     def _new_runtime(self) -> SessionRuntime:
         return SessionRuntime(
@@ -1334,10 +1386,43 @@ class SessionManager:
         )
 
     def _prune_terminal_session(self, session_id: str) -> None:
+        self._cancel_bootstrap_expiry(session_id)
         runtime = self._sessions.pop(session_id, None)
         if runtime is None:
             return
         self._opencode_attach.prune_runtime(runtime)
+
+    def _schedule_bootstrap_expiry(self, session_id: str) -> None:
+        ttl_seconds = self._bootstrap_session_ttl_seconds
+        if ttl_seconds is None or ttl_seconds <= 0:
+            return
+        self._cancel_bootstrap_expiry(session_id)
+        self._bootstrap_expiry_tasks[session_id] = asyncio.create_task(
+            self._expire_bootstrap_session(session_id, ttl_seconds)
+        )
+
+    def _cancel_bootstrap_expiry(self, session_id: str) -> None:
+        task = self._bootstrap_expiry_tasks.pop(session_id, None)
+        if task is None or task.done():
+            return
+        task.cancel()
+
+    async def _expire_bootstrap_session(
+        self, session_id: str, ttl_seconds: float
+    ) -> None:
+        try:
+            await asyncio.sleep(ttl_seconds)
+            runtime = self._sessions.get(session_id)
+            if runtime is None:
+                return
+            if runtime.connection_count > 0:
+                return
+            self._sessions.pop(session_id, None)
+            self._opencode_attach.prune_runtime(runtime)
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._bootstrap_expiry_tasks.pop(session_id, None)
 
     def _build_frontend_open_url(
         self, frontend_origin: str, runtime: SessionRuntime
@@ -1359,3 +1444,51 @@ class SessionManager:
         if runtime is None:
             return None
         return runtime.current_artifact()
+
+    async def resolve_local_checkpoint(
+        self, session_id: str, checkpoint_id: str, *, approve: bool
+    ) -> dict[str, Any]:
+        runtime = self._sessions.get(session_id)
+        if runtime is None:
+            raise KeyError(session_id)
+        await runtime.handle_client_message(
+            {
+                "type": "approve" if approve else "reject",
+                "payload": {"checkpoint_id": checkpoint_id},
+            }
+        )
+        return runtime.current_artifact()
+
+    def record_local_ui_telemetry(
+        self, session_id: str, payload: UiTelemetryPayload
+    ) -> dict[str, Any]:
+        runtime = self._sessions.get(session_id)
+        if runtime is None:
+            raise KeyError(session_id)
+        runtime.record_ui_telemetry(payload)
+        return {"ok": True}
+
+    def consume_local_resume_intent(
+        self, session_id: str, *, after_seq: int = 0
+    ) -> dict[str, Any]:
+        return self.read_local_resume_intent(
+            session_id, after_seq=after_seq, consume=True
+        )
+
+    def read_local_resume_intent(
+        self, session_id: str, *, after_seq: int = 0, consume: bool = False
+    ) -> dict[str, Any]:
+        runtime = self._sessions.get(session_id)
+        if runtime is None:
+            raise KeyError(session_id)
+        if consume:
+            return runtime.consume_resume_intent(after_seq=after_seq)
+        return runtime.peek_resume_intent(after_seq=after_seq)
+
+    def acknowledge_local_resume_intent(
+        self, session_id: str, *, resume_intent_seq: int
+    ) -> dict[str, Any]:
+        runtime = self._sessions.get(session_id)
+        if runtime is None:
+            raise KeyError(session_id)
+        return runtime.acknowledge_resume_intent(resume_intent_seq=resume_intent_seq)

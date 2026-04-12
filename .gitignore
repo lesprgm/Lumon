@@ -79,3 +79,7 @@ backend/.mypy_cache/
 /frontend/src/RootApp.test.tsx
 /frontend/scripts/
 /netlify.toml
+/tmp/
+/package.json
+/package-lock.json
+/.opencode/bun.lock

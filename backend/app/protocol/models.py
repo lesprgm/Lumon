@@ -89,6 +89,10 @@ class EmptyPayload(StrictModel):
     pass
 
 
+class StartTakeoverPayload(StrictModel):
+    mode_preference: Literal["remote", "direct"] | None = None
+
+
 class WebRTCRequestPayload(StrictModel):
     stream_profile: Literal["demo_local"] | None = None
 
@@ -98,6 +102,7 @@ class AdapterCapabilities(StrictModel):
     supports_approval: bool
     supports_takeover: bool
     supports_frames: bool
+    supports_direct_takeover: bool = False
 
 
 class ViewportConfig(StrictModel):
@@ -113,8 +118,11 @@ class SessionStatePayload(StrictModel):
     observer_mode: bool | None = None
     web_mode: Literal["observe_only", "delegate_playwright"] | None = None
     web_bridge: Literal["playwright_native"] | None = None
+    sprite_family: Literal["lobster", "dog"] = "lobster"
     state: SessionState
     interaction_mode: InteractionMode
+    takeover_mode: Literal["remote", "direct"] | None = None
+    takeover_url: str | None = None
     active_checkpoint_id: str | None = None
     task_text: str
     viewport: ViewportConfig
@@ -254,6 +262,9 @@ class UiTelemetryPayload(StrictModel):
         "open_suppressed",
         "open_completed",
         "open_failed",
+        "resume_requested",
+        "resume_succeeded",
+        "resume_failed",
         "meaningful_frame_visible",
         "intervention_visible",
         "clarity_ready",
@@ -263,6 +274,15 @@ class UiTelemetryPayload(StrictModel):
     source: Literal["frontend", "plugin"] = "frontend"
     timestamp: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResumeIntentRequest(StrictModel):
+    after_seq: int = 0
+    consume: bool = False
+
+
+class ResumeIntentAcknowledgeRequest(StrictModel):
+    resume_intent_seq: int
 
 
 class WebRTCAnswerPayload(StrictModel):
@@ -499,7 +519,7 @@ CLIENT_MESSAGE_MODELS: dict[str, type[StrictModel]] = {
     "remote_scroll": RemoteScrollPayload,
     "remote_key_down": RemoteKeyPayload,
     "remote_key_up": RemoteKeyPayload,
-    "start_takeover": EmptyPayload,
+    "start_takeover": StartTakeoverPayload,
     "end_takeover": EmptyPayload,
     "stop": EmptyPayload,
 }
