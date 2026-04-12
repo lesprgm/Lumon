@@ -10,7 +10,7 @@ The frontend is the supervision surface. It should stay quiet by default, render
 - deciding between live mode and review mode
 - bootstrapping websocket sessions
 - coordinating the overlay engine
-- persisting mascot choice
+- enforcing run-id message guards so stale events from older runs are ignored
 - loading review artifacts
 - exposing review navigation and metrics summary state
 
@@ -40,7 +40,7 @@ Responsibilities:
 Responsibilities:
 - top status chrome
 - session state summary
-- mascot selector (`Lobster` / `Dog`)
+- pinned lobster mascot (single-family UI for now)
 
 ### ReviewMetricsSummary
 `frontend/src/components/ReviewMetricsSummary.tsx`
@@ -105,9 +105,14 @@ Key pieces:
 - `engine/overlayEngine.ts`: derives scene snapshots, hotspot resolution, sprite targets
 - `sprites/`: sprite catalog, manifests, animation player, family selection support
 
-Current sprite families:
-- `lobster`
-- `dog`
+Current frontend mascot UI:
+- locked to `lobster` (dog selection is detached from the status bar)
+
+Typing perch resilience:
+- when a `type` event arrives without `target_rect`, overlay engine synthesizes a small
+  cursor-centered target box so the mascot still perches near the active input.
+- if a follow-up type event briefly omits cursor/rect, frontend reuses the recent typing
+  target rect for a short TTL to avoid perch flicker.
 
 The browser page should remain the truth layer. Sprite and markers are explanatory overlays, not the main content.
 

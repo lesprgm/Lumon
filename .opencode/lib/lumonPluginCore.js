@@ -1,9 +1,9 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 
 const DEFAULT_BACKEND_ORIGIN = "http://127.0.0.1:8000";
 const DEFAULT_FRONTEND_ORIGIN = DEFAULT_BACKEND_ORIGIN;
-const EXPECTED_RUNTIME_VERSION = "2026-03-22-reliability-v1";
 const DEFAULT_WEB_MODE = "observe_only";
 const DEFAULT_OPEN_POLICY = "browser_or_intervention";
 const DEFAULT_FORCE_DELEGATE_ON_BROWSER_SIGNAL = false;
@@ -12,6 +12,11 @@ const DEFAULT_INTERVENTION_EPISODE_GAP_MS = 10000;
 const DEFAULT_REOPEN_COOLDOWN_MS = 20000;
 const DEFAULT_ENABLE_PROMPT_STEERING = true;
 const DEFAULT_BROWSER_COMMAND_TIMEOUT_MS = 90000;
+const DEFAULT_RESUME_INTENT_POLL_MS = 1500;
+const DEFAULT_AUTO_RESUME_COOLDOWN_MS = 5000;
+const DEFAULT_AUTO_RESUME_BUSY_RETRY_MS = 600;
+const DEFAULT_AUTO_RESUME_BUSY_MAX_RETRIES = 5;
+const DIRECT_TAKEOVER_ENV = "LUMON_HEADLESS=0";
 const ACTIVE_BROWSER_TASK_WINDOW_MS = 180000;
 const OPEN_SIGNAL_DEDUPE_WINDOW_MS = 1000;
 const BROWSER_TOKENS = ["browser", "webfetch", "open_url", "open-url", "navigate", "visit", "goto", "search", "playwright", "chrome", "site"];
@@ -33,6 +38,22 @@ const INTERACTIVE_BROWSER_CONTEXT_HINTS = [
   "local page",
 ];
 const ATTACH_EVENT_PREFIXES = ["session.", "message.", "tool.", "permission."];
+const DEFAULT_RUNTIME_CONTRACT = {
+  runtime_version: "2026-03-22-reliability-v1",
+  backend_runtime_features: {
+    ui_telemetry: true,
+    ui_ready_handshake: true,
+    live_artifact_persistence: true,
+  },
+  frontend_features: {
+    ui_telemetry: true,
+    ui_ready_handshake: true,
+  },
+};
+const RUNTIME_CONTRACT = loadRuntimeContract();
+const EXPECTED_RUNTIME_VERSION = RUNTIME_CONTRACT.runtime_version;
+const REQUIRED_BACKEND_RUNTIME_FEATURES = RUNTIME_CONTRACT.backend_runtime_features;
+const EXPECTED_FRONTEND_FEATURES = RUNTIME_CONTRACT.frontend_features;
 
 function debugTrace(message, extra) {
   try {
@@ -43,11 +64,88 @@ function debugTrace(message, extra) {
   }
 }
 
+function loadRuntimeContract() {
+  try {
+    const payload = JSON.parse(readFileSync(new URL("../../lumon_runtime_contract.json", import.meta.url), "utf8"));
+    return {
+      runtime_version: String(payload.runtime_version || DEFAULT_RUNTIME_CONTRACT.runtime_version),
+      backend_runtime_features: {
+        ...DEFAULT_RUNTIME_CONTRACT.backend_runtime_features,
+        ...(payload.backend_runtime_features || {}),
+      },
+      frontend_features: {
+        ...DEFAULT_RUNTIME_CONTRACT.frontend_features,
+        ...(payload.frontend_features || {}),
+      },
+    };
+  } catch {
+    return DEFAULT_RUNTIME_CONTRACT;
+  }
+}
+
+function normalizeOrigin(origin) {
+  return String(origin || "").replace(/\/+$/, "");
+}
+
+function parseEnvAssignments(text) {
+  const values = {};
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const separator = line.indexOf("=");
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    let value = line.slice(separator + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    values[key] = value;
+  }
+  return values;
+}
+
+function readRuntimeOriginsFromEnvFile(runtimeDirectory) {
+  try {
+    const payload = parseEnvAssignments(readFileSync(join(runtimeDirectory, "output", "runtime", "lumon_backend.env"), "utf8"));
+    const backendOrigin = firstNonEmptyString(
+      payload.LUMON_PLUGIN_BACKEND_ORIGIN,
+      payload.VITE_LUMON_BACKEND_ORIGIN,
+      payload.LUMON_BACKEND_ORIGIN,
+    );
+    const frontendOrigin = firstNonEmptyString(
+      payload.LUMON_PLUGIN_FRONTEND_ORIGIN,
+      payload.VITE_LUMON_FRONTEND_ORIGIN,
+      payload.LUMON_FRONTEND_ORIGIN,
+    );
+    if (!backendOrigin && !frontendOrigin) {
+      return null;
+    }
+    return {
+      backendOrigin: backendOrigin ? normalizeOrigin(backendOrigin) : null,
+      frontendOrigin: frontendOrigin ? normalizeOrigin(frontendOrigin) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function hasRequiredFeatures(actual = {}, expected = {}) {
+  return Object.entries(expected).every(([key, value]) => {
+    if (value !== true) return true;
+    return actual?.[key] === true;
+  });
+}
+
 export function loadPluginConfig(env = process.env) {
   const webMode = env.LUMON_PLUGIN_WEB_MODE === "delegate_playwright" ? "delegate_playwright" : DEFAULT_WEB_MODE;
+  const backendOriginExplicit = typeof env.LUMON_PLUGIN_BACKEND_ORIGIN === "string" && env.LUMON_PLUGIN_BACKEND_ORIGIN.trim().length > 0;
+  const backendOrigin = env.LUMON_PLUGIN_BACKEND_ORIGIN || DEFAULT_BACKEND_ORIGIN;
+  const frontendOriginExplicit = typeof env.LUMON_PLUGIN_FRONTEND_ORIGIN === "string" && env.LUMON_PLUGIN_FRONTEND_ORIGIN.trim().length > 0;
   return {
-    backendOrigin: env.LUMON_PLUGIN_BACKEND_ORIGIN || DEFAULT_BACKEND_ORIGIN,
-    frontendOrigin: env.LUMON_PLUGIN_FRONTEND_ORIGIN || env.LUMON_PLUGIN_BACKEND_ORIGIN || DEFAULT_FRONTEND_ORIGIN,
+    backendOrigin,
+    backendOriginExplicit,
+    frontendOrigin: env.LUMON_PLUGIN_FRONTEND_ORIGIN || backendOrigin || DEFAULT_FRONTEND_ORIGIN,
+    frontendOriginExplicit,
     webMode,
     autoDelegate: env.LUMON_PLUGIN_AUTO_DELEGATE === "1" || env.LUMON_PLUGIN_AUTO_DELEGATE === "true",
     openPolicy: env.LUMON_PLUGIN_OPEN_POLICY || DEFAULT_OPEN_POLICY,
@@ -61,6 +159,14 @@ export function loadPluginConfig(env = process.env) {
     interventionEpisodeGapMs: Number(env.LUMON_PLUGIN_INTERVENTION_EPISODE_GAP_MS || DEFAULT_INTERVENTION_EPISODE_GAP_MS),
     reopenCooldownMs: Number(env.LUMON_PLUGIN_REOPEN_COOLDOWN_MS || DEFAULT_REOPEN_COOLDOWN_MS),
     browserCommandTimeoutMs: Number(env.LUMON_PLUGIN_BROWSER_COMMAND_TIMEOUT_MS || DEFAULT_BROWSER_COMMAND_TIMEOUT_MS),
+    resumeIntentPollMs: Number(env.LUMON_PLUGIN_RESUME_INTENT_POLL_MS || DEFAULT_RESUME_INTENT_POLL_MS),
+    autoResumeCooldownMs: Number(env.LUMON_PLUGIN_AUTO_RESUME_COOLDOWN_MS || DEFAULT_AUTO_RESUME_COOLDOWN_MS),
+    autoResumeBusyRetryMs: Number(
+      env.LUMON_PLUGIN_AUTO_RESUME_BUSY_RETRY_MS || DEFAULT_AUTO_RESUME_BUSY_RETRY_MS,
+    ),
+    autoResumeBusyMaxRetries: Number(
+      env.LUMON_PLUGIN_AUTO_RESUME_BUSY_MAX_RETRIES || DEFAULT_AUTO_RESUME_BUSY_MAX_RETRIES,
+    ),
     enablePromptSteering:
       env.LUMON_PLUGIN_ENABLE_PROMPT_STEERING == null
         ? DEFAULT_ENABLE_PROMPT_STEERING
@@ -80,6 +186,10 @@ function firstNonEmptyString(...candidates) {
     }
   }
   return null;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
 function buildOpenSignalKey(event, signal, fallbackUrl = "") {
@@ -185,6 +295,95 @@ export function extractProjectDirectory(event, fallbackDirectory) {
   );
 }
 
+function extractSessionState(event) {
+  const candidates = [
+    event?.state,
+    event?.session?.state,
+    event?.payload?.state,
+    event?.payload?.session?.state,
+    event?.message?.state,
+    event?.message?.session?.state,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim().toLowerCase();
+    }
+  }
+  return null;
+}
+
+function extractTakeoverMetadata(event) {
+  const modeCandidates = [
+    event?.takeover_mode,
+    event?.takeoverMode,
+    event?.session?.takeover_mode,
+    event?.session?.takeoverMode,
+    event?.payload?.takeover_mode,
+    event?.payload?.takeoverMode,
+    event?.payload?.session?.takeover_mode,
+    event?.payload?.session?.takeoverMode,
+  ];
+  let takeoverMode = null;
+  for (const candidate of modeCandidates) {
+    if (candidate === "remote" || candidate === "direct") {
+      takeoverMode = candidate;
+      break;
+    }
+  }
+
+  const urlCandidates = [
+    event?.takeover_url,
+    event?.takeoverUrl,
+    event?.session?.takeover_url,
+    event?.session?.takeoverUrl,
+    event?.payload?.takeover_url,
+    event?.payload?.takeoverUrl,
+    event?.payload?.session?.takeover_url,
+    event?.payload?.session?.takeoverUrl,
+  ];
+  let takeoverUrl = null;
+  for (const candidate of urlCandidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      takeoverUrl = candidate.trim();
+      break;
+    }
+  }
+
+  return { takeoverMode, takeoverUrl };
+}
+
+function isDirectTakeoverContext(result, session) {
+  const modeCandidate =
+    result?.meta?.takeover_mode ||
+    result?.takeover_mode ||
+    session?.takeoverMode ||
+    null;
+  return modeCandidate === "direct";
+}
+
+function isDirectTakeoverActiveContext(result, session) {
+  if (!isDirectTakeoverContext(result, session)) {
+    return false;
+  }
+  if (session?.takeoverActive === true) {
+    return true;
+  }
+  const stateCandidate =
+    result?.meta?.session_state ||
+    result?.session_state ||
+    result?.state ||
+    null;
+  return typeof stateCandidate === "string" && stateCandidate.toLowerCase() === "takeover";
+}
+
+function shouldForegroundLumonOnResume(reason) {
+  const normalized = String(reason || "").trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return normalized === "takeover_returned_control";
+}
+
 function resolveDirectory(...candidates) {
   for (const value of candidates) {
     if (typeof value === "string" && value.trim().length > 0) {
@@ -267,8 +466,32 @@ export function isAttachRelevantEvent(event) {
   return ATTACH_EVENT_PREFIXES.some((prefix) => eventType.startsWith(prefix));
 }
 
+function extractStructuredOpenSignal(event) {
+  const candidates = [
+    event?.lumon_open_signal,
+    event?.open_signal,
+    event?.open_signal_type,
+    event?.payload?.lumon_open_signal,
+    event?.payload?.open_signal,
+    event?.payload?.open_signal_type,
+    event?.payload?.open_signal?.kind,
+    event?.payload?.open_signal?.type,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const normalized = candidate.trim().toLowerCase();
+    if (normalized === "browser" || normalized === "intervention") {
+      return normalized;
+    }
+  }
+  return null;
+}
+
 function hasStructuredIntervention(event) {
   if (!event || typeof event !== "object") return false;
+  if (extractStructuredOpenSignal(event) === "intervention") {
+    return true;
+  }
   const eventType = eventTypeOf(event).toLowerCase();
   if (eventType === "approval_required" || eventType === "bridge_offer") {
     return true;
@@ -293,6 +516,9 @@ function hasStructuredIntervention(event) {
 
 function hasStructuredBrowserSignal(event) {
   if (!event || typeof event !== "object") return false;
+  if (extractStructuredOpenSignal(event) === "browser") {
+    return true;
+  }
   const eventType = eventTypeOf(event).toLowerCase();
 
   if (eventType.includes("browser") || eventType.includes("webfetch")) {
@@ -370,6 +596,10 @@ export function shouldOpenForEvent(event, openPolicy = DEFAULT_OPEN_POLICY) {
 }
 
 export function classifyOpenSignal(event) {
+  const explicitSignal = extractStructuredOpenSignal(event);
+  if (explicitSignal) {
+    return explicitSignal;
+  }
   const eventType = eventTypeOf(event).toLowerCase();
 
   if (hasStructuredIntervention(event)) {
@@ -489,6 +719,9 @@ export function createLumonController({
   config,
   attach,
   command,
+  consumeResumeIntent,
+  acknowledgeResumeIntent,
+  continueSession,
   startApp,
   waitForHealth,
   openUrl,
@@ -502,6 +735,8 @@ export function createLumonController({
   const inflight = new Map();
   let startupPromise = null;
   let recentDelegateFailures = 0;
+  let resumePoller = null;
+  let resumePollInFlight = false;
 
   const fireUiTelemetry = ({ sessionId, event, meta = {} }) => {
     if (typeof recordUiTelemetry === "function") {
@@ -545,6 +780,7 @@ export function createLumonController({
     }).then((response) => {
       const session = {
         observedSessionId,
+        projectDirectory: payload.project_directory,
         lumonSessionId: response.session_id,
         openUrl: response.open_url,
         alreadyAttached: Boolean(response.already_attached),
@@ -559,6 +795,18 @@ export function createLumonController({
         attachedAt: Date.now(),
         lastOpenSignalKey: previousSession?.lastOpenSignalKey || null,
         lastOpenSignalAt: previousSession?.lastOpenSignalAt || 0,
+        takeoverActive: previousSession?.takeoverActive || false,
+        takeoverMode: previousSession?.takeoverMode || null,
+        takeoverUrl: previousSession?.takeoverUrl || null,
+        lastResumeIntentSeq: previousSession?.lastResumeIntentSeq || 0,
+        pendingResumeIntentSeq: previousSession?.pendingResumeIntentSeq || 0,
+        pendingResumeReason: previousSession?.pendingResumeReason || null,
+        autoResumeInFlight: false,
+        lastAutoResumeAt: previousSession?.lastAutoResumeAt || 0,
+        autoResumeFailureCount: previousSession?.autoResumeFailureCount || 0,
+        suppressUntilNextTakeover:
+          previousSession?.suppressUntilNextTakeover || false,
+        stoppedAt: previousSession?.stoppedAt || null,
       };
       sessions.set(observedSessionId, session);
       if (typeof autoStartLatencyMs === "number") {
@@ -577,6 +825,287 @@ export function createLumonController({
 
     inflight.set(observedSessionId, promise);
     return promise;
+  }
+
+  function stopResumePollerIfIdle() {
+    if (sessions.size > 0 || !resumePoller) {
+      return;
+    }
+    clearInterval(resumePoller);
+    resumePoller = null;
+    resumePollInFlight = false;
+  }
+
+  function markSessionStopped(observedSessionId) {
+    if (typeof observedSessionId !== "string" || observedSessionId.trim().length === 0) {
+      return;
+    }
+    const session = sessions.get(observedSessionId);
+    if (!session) {
+      return;
+    }
+    session.takeoverActive = false;
+    session.pendingResumeIntentSeq = 0;
+    session.pendingResumeReason = null;
+    session.suppressUntilNextTakeover = true;
+    session.stoppedAt = Date.now();
+  }
+
+  async function executeContinueWithBusyRetry(session, resumeIntent) {
+    const retries = Math.max(
+      0,
+      Number(config.autoResumeBusyMaxRetries || DEFAULT_AUTO_RESUME_BUSY_MAX_RETRIES),
+    );
+    const retryDelayMs = Math.max(
+      100,
+      Number(config.autoResumeBusyRetryMs || DEFAULT_AUTO_RESUME_BUSY_RETRY_MS),
+    );
+    let attempt = 0;
+    while (attempt <= retries) {
+      attempt += 1;
+      try {
+        await continueSession({
+          observedSessionId: session.observedSessionId,
+          projectDirectory: session.projectDirectory,
+          reason: String(resumeIntent.reason || "takeover_returned_control"),
+          takeoverMode: session.takeoverMode || null,
+        });
+        return { attempts: attempt };
+      } catch (error) {
+        const message = String(error?.message || error || "").toLowerCase();
+        const isBusyError = message.includes("busy") || message.includes("still finishing");
+        if (!isBusyError || attempt > retries) {
+          throw error;
+        }
+        await sleep(retryDelayMs);
+      }
+    }
+    return { attempts: retries + 1 };
+  }
+
+  function upsertSessionFromTool({ observedSessionId, lumonSessionId, projectDirectory, openUrl = null, uiConnected = false, takeoverMode = null, takeoverUrl = null } = {}) {
+    if (typeof observedSessionId !== "string" || observedSessionId.trim().length === 0) {
+      return null;
+    }
+    const previousSession = sessions.get(observedSessionId) || null;
+    const resolvedLumonSessionId =
+      typeof lumonSessionId === "string" && lumonSessionId.trim().length > 0
+        ? lumonSessionId
+        : previousSession?.lumonSessionId;
+    if (typeof resolvedLumonSessionId !== "string" || resolvedLumonSessionId.trim().length === 0) {
+      return previousSession;
+    }
+    const session = {
+      observedSessionId,
+      projectDirectory: resolveDirectory(projectDirectory, previousSession?.projectDirectory),
+      lumonSessionId: resolvedLumonSessionId,
+      openUrl:
+        typeof openUrl === "string" && openUrl.trim().length > 0
+          ? openUrl
+          : previousSession?.openUrl || "",
+      alreadyAttached: previousSession?.alreadyAttached || false,
+      uiConnected: uiConnected === true || previousSession?.uiConnected === true,
+      uiReadyAt: previousSession?.uiReadyAt || null,
+      lastOpenedAt: previousSession?.lastOpenedAt || 0,
+      openInProgress: previousSession?.openInProgress || false,
+      lastRelevantBrowserAt: previousSession?.lastRelevantBrowserAt || 0,
+      lastRelevantInterventionAt: previousSession?.lastRelevantInterventionAt || 0,
+      delegatePrimed: previousSession?.delegatePrimed || false,
+      lastDelegatePrimeAt: previousSession?.lastDelegatePrimeAt || 0,
+      attachedAt: previousSession?.attachedAt || Date.now(),
+      lastOpenSignalKey: previousSession?.lastOpenSignalKey || null,
+      lastOpenSignalAt: previousSession?.lastOpenSignalAt || 0,
+      takeoverActive: previousSession?.takeoverActive || false,
+      takeoverMode:
+        takeoverMode === "remote" || takeoverMode === "direct"
+          ? takeoverMode
+          : previousSession?.takeoverMode || null,
+      takeoverUrl:
+        typeof takeoverUrl === "string" && takeoverUrl.trim().length > 0
+          ? takeoverUrl
+          : previousSession?.takeoverUrl || null,
+      lastResumeIntentSeq: previousSession?.lastResumeIntentSeq || 0,
+      pendingResumeIntentSeq: previousSession?.pendingResumeIntentSeq || 0,
+      pendingResumeReason: previousSession?.pendingResumeReason || null,
+      autoResumeInFlight: false,
+      lastAutoResumeAt: previousSession?.lastAutoResumeAt || 0,
+      autoResumeFailureCount: previousSession?.autoResumeFailureCount || 0,
+      suppressUntilNextTakeover:
+        previousSession?.suppressUntilNextTakeover || false,
+      stoppedAt: previousSession?.stoppedAt || null,
+    };
+    sessions.set(observedSessionId, session);
+    ensureResumePoller();
+    return session;
+  }
+
+  async function maybeAutoResumeSession(session, source) {
+    if (
+      !session ||
+      typeof consumeResumeIntent !== "function" ||
+      typeof continueSession !== "function" ||
+      session.autoResumeInFlight
+    ) {
+      return;
+    }
+    if (session.suppressUntilNextTakeover === true) {
+      return;
+    }
+    session.autoResumeInFlight = true;
+    try {
+      const afterSeq = session.pendingResumeIntentSeq
+        ? Math.max(0, Number(session.pendingResumeIntentSeq) - 1)
+        : session.lastResumeIntentSeq || 0;
+      const resumeIntent = await consumeResumeIntent({
+        sessionId: session.lumonSessionId,
+        afterSeq,
+        consume: false,
+      });
+      if (!resumeIntent || resumeIntent.pending !== true) {
+        session.pendingResumeIntentSeq = 0;
+        session.pendingResumeReason = null;
+        return;
+      }
+      const resumeSeq = Number(resumeIntent.resume_intent_seq || 0);
+      if (resumeSeq <= (session.lastResumeIntentSeq || 0)) {
+        session.pendingResumeIntentSeq = 0;
+        session.pendingResumeReason = null;
+        return;
+      }
+      session.pendingResumeIntentSeq = resumeSeq;
+      session.pendingResumeReason = String(resumeIntent.reason || "takeover_returned_control");
+      void fireUiTelemetry({
+        sessionId: session.lumonSessionId,
+        event: "resume_requested",
+        meta: {
+          reason_code: String(resumeIntent.reason || "takeover_returned_control"),
+          source,
+          resume_intent_seq: resumeSeq,
+        },
+      });
+      await log(
+        `auto_resume_prompt observed_session_id=${session.observedSessionId} reason=${String(
+          resumeIntent.reason || "takeover_returned_control",
+        )} resume_intent_seq=${resumeSeq}`,
+      );
+      const startedAt = Date.now();
+      const continueResult = await executeContinueWithBusyRetry(session, resumeIntent);
+      if (typeof acknowledgeResumeIntent === "function") {
+        await acknowledgeResumeIntent({
+          sessionId: session.lumonSessionId,
+          resumeIntentSeq: resumeSeq,
+        });
+      }
+      session.lastResumeIntentSeq = resumeSeq;
+      session.pendingResumeIntentSeq = 0;
+      session.pendingResumeReason = null;
+      session.lastAutoResumeAt = Date.now();
+      session.autoResumeFailureCount = 0;
+      if (
+        shouldForegroundLumonOnResume(resumeIntent.reason) &&
+        typeof session.openUrl === "string" &&
+        session.openUrl.trim().length > 0 &&
+        typeof openUrl === "function"
+      ) {
+        try {
+          await openUrl(session.openUrl);
+          session.lastOpenedAt = Date.now();
+          void fireUiTelemetry({
+            sessionId: session.lumonSessionId,
+            event: "open_completed",
+            meta: {
+              reason_code: "resume_foreground",
+              source,
+              resume_intent_seq: resumeSeq,
+            },
+          });
+        } catch (openError) {
+          void fireUiTelemetry({
+            sessionId: session.lumonSessionId,
+            event: "open_failed",
+            meta: {
+              reason_code: "resume_foreground",
+              source,
+              resume_intent_seq: resumeSeq,
+              message: String(openError?.message || openError || ""),
+            },
+          });
+        }
+      }
+      await log(
+        `auto_resume_prompt_succeeded observed_session_id=${session.observedSessionId} resume_intent_seq=${resumeSeq}`,
+      );
+      void fireUiTelemetry({
+        sessionId: session.lumonSessionId,
+        event: "resume_succeeded",
+        meta: {
+          source,
+          resume_intent_seq: resumeSeq,
+          retry_count: Math.max(0, Number(continueResult?.attempts || 1) - 1),
+          latency_ms: Date.now() - startedAt,
+        },
+      });
+    } catch (error) {
+      session.autoResumeFailureCount = Number(session.autoResumeFailureCount || 0) + 1;
+      if (session.autoResumeFailureCount >= 5) {
+        session.suppressUntilNextTakeover = true;
+      }
+      const errorMessage = String(error?.message || error || "");
+      const likelyStaleSession = /\b(404|session not found)\b/i.test(errorMessage);
+      if (likelyStaleSession) {
+        sessions.delete(session.observedSessionId);
+        inflight.delete(session.observedSessionId);
+        commandActivity.delete(session.observedSessionId);
+        pendingPromptSteering.delete(session.observedSessionId);
+        activeBrowserTasks.delete(session.observedSessionId);
+        stopResumePollerIfIdle();
+      }
+      void fireUiTelemetry({
+        sessionId: session.lumonSessionId,
+        event: "resume_failed",
+        meta: {
+          source,
+          resume_intent_seq: session.pendingResumeIntentSeq || null,
+          failure_count: session.autoResumeFailureCount,
+          suppressed: session.suppressUntilNextTakeover === true,
+          message: errorMessage,
+        },
+      });
+      await log(
+        `auto_resume_prompt_error observed_session_id=${session.observedSessionId} message=${String(
+          error?.message || error || "unknown error",
+        )}`,
+      );
+      await log(`Lumon auto-resume failed: ${String(error?.message || error || "unknown error")}`);
+    } finally {
+      session.autoResumeInFlight = false;
+    }
+  }
+
+  function ensureResumePoller() {
+    if (resumePoller || typeof consumeResumeIntent !== "function" || typeof continueSession !== "function") {
+      return;
+    }
+    if (sessions.size === 0) {
+      return;
+    }
+    const intervalMs = Math.max(500, Number(config.resumeIntentPollMs || DEFAULT_RESUME_INTENT_POLL_MS));
+    resumePoller = setInterval(async () => {
+      if (resumePollInFlight || sessions.size === 0) {
+        return;
+      }
+      resumePollInFlight = true;
+      try {
+        for (const session of sessions.values()) {
+          await maybeAutoResumeSession(session, "poll");
+        }
+      } finally {
+        resumePollInFlight = false;
+      }
+    }, intervalMs);
+    if (typeof resumePoller.unref === "function") {
+      resumePoller.unref();
+    }
   }
 
   async function handleEvent(event, directory) {
@@ -609,11 +1138,34 @@ export function createLumonController({
     }
     if (relevant && observedSessionId && (signal !== null || sessions.has(observedSessionId))) {
       await ensureAttached(event, directory);
+      ensureResumePoller();
     }
 
     if (!observedSessionId) return;
     const session = sessions.get(observedSessionId);
     if (session) {
+      const sessionState = extractSessionState(event);
+      const takeoverMeta = extractTakeoverMetadata(event);
+      if (takeoverMeta.takeoverMode) {
+        session.takeoverMode = takeoverMeta.takeoverMode;
+      }
+      if (takeoverMeta.takeoverUrl) {
+        session.takeoverUrl = takeoverMeta.takeoverUrl;
+      }
+      if (sessionState === "takeover") {
+        session.takeoverActive = true;
+        session.suppressUntilNextTakeover = false;
+        session.autoResumeFailureCount = 0;
+        session.stoppedAt = null;
+        if (session.pendingResumeIntentSeq > 0) {
+          session.pendingResumeIntentSeq = 0;
+          session.pendingResumeReason = null;
+        }
+        ensureResumePoller();
+      } else if (session.takeoverActive && sessionState === "running") {
+        session.takeoverActive = false;
+        await maybeAutoResumeSession(session, "event_transition");
+      }
       const previousBrowserAt = session.lastRelevantBrowserAt;
       const previousInterventionAt = session.lastRelevantInterventionAt;
       const isBrowserSignal = signal === "browser";
@@ -727,7 +1279,7 @@ export function createLumonController({
           !pendingPromptActive &&
           !recentToolBrowserActivity &&
           (session.delegatePrimed || !config.forceDelegateOnBrowserSignal));
-      if (canOpenForSignal && shouldOpenForEvent(event, config.openPolicy)) {
+        if (canOpenForSignal && shouldOpenForEvent(event, config.openPolicy)) {
         const episodeGapMs = isInterventionSignal ? config.interventionEpisodeGapMs : config.browserEpisodeGapMs;
         const previousRelevantAt = isInterventionSignal ? previousInterventionAt : previousBrowserAt;
         const openSignalKey = buildOpenSignalKey(event, signal, session.openUrl);
@@ -778,6 +1330,14 @@ export function createLumonController({
             ? await ensureAttached(event, directory, { forceRefresh: true })
             : null;
           const openTarget = refreshedSession || session;
+          if (isDirectTakeoverActiveContext(null, openTarget)) {
+            void fireUiTelemetry({
+              sessionId: openTarget.lumonSessionId,
+              event: "open_suppressed",
+              meta: { reason_code: "direct_takeover_mode", signal, event_type: eventTypeOf(event) },
+            });
+            return;
+          }
           if (openTarget.uiConnected === true && openTarget.openUrl === session.openUrl) {
             void fireUiTelemetry({
               sessionId: openTarget.lumonSessionId,
@@ -883,39 +1443,113 @@ export function createLumonController({
       inflight.delete(observedSessionId);
       commandActivity.delete(observedSessionId);
       pendingPromptSteering.delete(observedSessionId);
+      activeBrowserTasks.delete(observedSessionId);
+      stopResumePollerIfIdle();
     }
   }
 
   return {
     sessions,
+    ensureAutoResumePolling: ensureResumePoller,
+    stopAutoResumePollingIfIdle: stopResumePollerIfIdle,
+    upsertSessionFromTool,
+    markSessionStopped,
     handleEvent,
   };
 }
 
 function createRuntimeHelpers({ $, directory, client, config }) {
   const runtimeDirectory = resolveDirectory(directory);
-  const healthUrl = `${config.backendOrigin}/healthz`;
-  const attachUrl = `${config.backendOrigin}/api/local/observe/opencode`;
-  const browserCommandUrl = `${config.backendOrigin}/api/local/opencode/browser/command`;
-  const frontendUrl = config.frontendOrigin;
-  const frontendServedByBackend = frontendUrl.replace(/\/$/, "") === config.backendOrigin.replace(/\/$/, "");
-  const frontendReadyUrl = frontendServedByBackend ? `${config.backendOrigin}/__lumon_frontend_ready__` : frontendUrl;
-  const uiTelemetryUrl = (sessionId) => `${config.backendOrigin}/api/local/session/${encodeURIComponent(sessionId)}/ui-telemetry`;
+  const origins = {
+    backendOrigin: normalizeOrigin(config.backendOrigin),
+    frontendOrigin: normalizeOrigin(config.frontendOrigin),
+  };
+  const getBackendOrigin = () => origins.backendOrigin;
+  const getFrontendOrigin = () => origins.frontendOrigin;
+  const frontendServedByBackend = () => getFrontendOrigin() === getBackendOrigin();
+  const healthUrl = () => `${getBackendOrigin()}/healthz`;
+  const attachUrl = () => `${getBackendOrigin()}/api/local/observe/opencode`;
+  const browserCommandUrl = () => `${getBackendOrigin()}/api/local/opencode/browser/command`;
+  const consumeResumeIntentUrl = (sessionId) =>
+    `${getBackendOrigin()}/api/local/session/${encodeURIComponent(sessionId)}/consume-resume-intent`;
+  const frontendReadyUrl = () =>
+    frontendServedByBackend()
+      ? `${getBackendOrigin()}/__lumon_frontend_ready__`
+      : `${getFrontendOrigin()}/lumon-runtime.json`;
+  const uiTelemetryUrl = (sessionId) => `${getBackendOrigin()}/api/local/session/${encodeURIComponent(sessionId)}/ui-telemetry`;
   let telemetryCapabilityWarningShown = false;
+  let lastHealthCheckAt = 0;
+  let lastHealthPayload = null;
+
+  const updateRuntimeOrigins = ({ backendOrigin = null, frontendOrigin = null, reason = "runtime_update" }) => {
+    const previousBackendOrigin = getBackendOrigin();
+    const previousFrontendOrigin = getFrontendOrigin();
+    let changed = false;
+    if (typeof backendOrigin === "string" && backendOrigin.trim().length > 0) {
+      const normalized = normalizeOrigin(backendOrigin);
+      if (normalized && normalized !== previousBackendOrigin) {
+        origins.backendOrigin = normalized;
+        config.backendOrigin = normalized;
+        changed = true;
+      }
+    }
+    if (typeof frontendOrigin === "string" && frontendOrigin.trim().length > 0) {
+      const normalized = normalizeOrigin(frontendOrigin);
+      if (normalized && normalized !== previousFrontendOrigin) {
+        origins.frontendOrigin = normalized;
+        config.frontendOrigin = normalized;
+        changed = true;
+      }
+    }
+    if (changed) {
+      lastHealthCheckAt = 0;
+      lastHealthPayload = null;
+      debugTrace("runtimeOrigins.updated", {
+        reason,
+        backendOrigin: getBackendOrigin(),
+        frontendOrigin: getFrontendOrigin(),
+        previousBackendOrigin,
+        previousFrontendOrigin,
+      });
+    }
+    return changed;
+  };
+
+  const refreshOriginsFromRuntimeEnv = () => {
+    const runtimeOrigins = readRuntimeOriginsFromEnvFile(runtimeDirectory);
+    if (!runtimeOrigins) {
+      return false;
+    }
+    const previousBackendOrigin = getBackendOrigin();
+    const previousFrontendOrigin = getFrontendOrigin();
+    const resolvedBackendOrigin =
+      runtimeOrigins.backendOrigin && !config.backendOriginExplicit ? runtimeOrigins.backendOrigin : previousBackendOrigin;
+    let resolvedFrontendOrigin = previousFrontendOrigin;
+    if (runtimeOrigins.frontendOrigin && !config.frontendOriginExplicit) {
+      resolvedFrontendOrigin = runtimeOrigins.frontendOrigin;
+    } else if (!config.frontendOriginExplicit && previousFrontendOrigin === previousBackendOrigin) {
+      resolvedFrontendOrigin = resolvedBackendOrigin;
+    }
+    return updateRuntimeOrigins({
+      backendOrigin: resolvedBackendOrigin,
+      frontendOrigin: resolvedFrontendOrigin,
+      reason: "runtime_env",
+    });
+  };
 
   const fetchFrontendReady = async () => {
     try {
-      const response = await fetch(frontendReadyUrl);
+      const response = await fetch(frontendReadyUrl());
       if (!response.ok) return false;
-      if (frontendServedByBackend) {
-        const payload = typeof response.json === "function" ? await response.json() : null;
+      const payload = typeof response.json === "function" ? await response.json() : null;
+      if (frontendServedByBackend()) {
         const frontendRuntimeVersion = payload?.frontend_runtime_version || payload?.runtime_version;
         const frontendFeatures = payload?.frontend_features || {};
-        return frontendRuntimeVersion === EXPECTED_RUNTIME_VERSION && frontendFeatures.ui_telemetry === true;
+        return frontendRuntimeVersion === EXPECTED_RUNTIME_VERSION && hasRequiredFeatures(frontendFeatures, EXPECTED_FRONTEND_FEATURES);
       }
-      const text = typeof response.text === "function" ? await response.text() : "";
-      const normalized = String(text || "");
-      return normalized.includes("Lumon") || normalized.includes('id="root"') || normalized.includes("id='root'");
+      const frontendRuntimeVersion = payload?.frontend_runtime_version || payload?.runtime_version;
+      const frontendFeatures = payload?.features || payload?.frontend_features || {};
+      return frontendRuntimeVersion === EXPECTED_RUNTIME_VERSION && hasRequiredFeatures(frontendFeatures, EXPECTED_FRONTEND_FEATURES);
     } catch {
       return false;
     }
@@ -929,15 +1563,12 @@ function createRuntimeHelpers({ $, directory, client, config }) {
     return await response.json();
   };
 
-  let lastHealthCheckAt = 0;
-  let lastHealthPayload = null;
-
   const verifyBackendVersion = async () => {
     const now = Date.now();
     if (lastHealthPayload && now - lastHealthCheckAt < 2000) {
       return lastHealthPayload;
     }
-    const payload = await fetchJson(healthUrl);
+    const payload = await fetchJson(healthUrl());
     lastHealthCheckAt = now;
     lastHealthPayload = payload;
     if (payload.runtime_version !== EXPECTED_RUNTIME_VERSION) {
@@ -945,7 +1576,7 @@ function createRuntimeHelpers({ $, directory, client, config }) {
         `Stale Lumon backend detected (${payload.runtime_version || "unknown"}). Run \`./lumon restart\` so the plugin and backend are on the same runtime version.`,
       );
     }
-    if (payload.runtime_features?.ui_telemetry !== true || payload.runtime_features?.live_artifact_persistence !== true) {
+    if (!hasRequiredFeatures(payload.runtime_features, REQUIRED_BACKEND_RUNTIME_FEATURES)) {
       throw new Error("Stale Lumon backend detected (missing eval capabilities). Run `./lumon restart` so Lumon can measure trust, clarity, and latency correctly.");
     }
     return payload;
@@ -1009,7 +1640,7 @@ function createRuntimeHelpers({ $, directory, client, config }) {
       }
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
-    throw new Error(`Lumon backend did not become ready at ${config.backendOrigin}`);
+    throw new Error(`Lumon backend did not become ready at ${getBackendOrigin()}`);
   };
 
   const waitForFrontend = async () => {
@@ -1024,7 +1655,7 @@ function createRuntimeHelpers({ $, directory, client, config }) {
   const attach = async (payload) => {
     await verifyBackendVersion();
     debugTrace("attach.request", payload);
-    const response = await fetch(attachUrl, {
+    const response = await fetch(attachUrl(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1047,7 +1678,7 @@ function createRuntimeHelpers({ $, directory, client, config }) {
       : null;
     let response;
     try {
-      response = await fetch(browserCommandUrl, {
+      response = await fetch(browserCommandUrl(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1096,17 +1727,91 @@ function createRuntimeHelpers({ $, directory, client, config }) {
     return parsed;
   };
 
+  const consumeResumeIntent = async ({ sessionId, afterSeq = 0, consume = false }) => {
+    const response = await fetch(consumeResumeIntentUrl(sessionId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        after_seq: Number(afterSeq || 0),
+        consume: consume === true,
+      }),
+    });
+    if (!response.ok) {
+      const body = typeof response.text === "function" ? await response.text() : "";
+      throw new Error(`consume resume intent failed (${response.status}): ${body}`);
+    }
+    return await response.json();
+  };
+
+  const acknowledgeResumeIntent = async ({ sessionId, resumeIntentSeq }) => {
+    const response = await fetch(
+      `${getBackendOrigin()}/api/local/session/${encodeURIComponent(sessionId)}/ack-resume-intent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resume_intent_seq: Number(resumeIntentSeq || 0) }),
+      },
+    );
+    if (!response.ok) {
+      const body = typeof response.text === "function" ? await response.text() : "";
+      throw new Error(`ack resume intent failed (${response.status}): ${body}`);
+    }
+    return await response.json();
+  };
+
+  const continueSession = async ({ observedSessionId, projectDirectory, reason }) => {
+    if (!client?.session || typeof client.session.promptAsync !== "function") {
+      throw new Error("OpenCode client does not support session.promptAsync");
+    }
+    const normalizedReason = reason || "takeover_returned_control";
+    await client.session.promptAsync({
+      path: { id: observedSessionId },
+      query: {
+        directory: resolveDirectory(projectDirectory, runtimeDirectory),
+      },
+      body: {
+        tools: {
+          lumon_browser: true,
+          webfetch: false,
+        },
+        parts: [
+          {
+            type: "text",
+            text:
+              "Auto-resume handoff: you now have control back in Lumon after manual takeover. First run lumon_browser with command=\"status\" exactly once to validate the current page state, then continue from that state without repeating completed actions.",
+            metadata: {
+              lumon_auto_resume: true,
+              reason: normalizedReason,
+              lumon_resume_strategy: "status_first",
+              lumon_drift_check: "status_first",
+            },
+          },
+        ],
+      },
+    });
+  };
+
+  const continueSessionWithTakeoverHint = async ({ observedSessionId, projectDirectory, reason, takeoverMode }) => {
+    if (takeoverMode === "direct") {
+      await log(
+        `Return control complete for ${observedSessionId}. For zero-lag manual control in future sessions, start OpenCode with ${DIRECT_TAKEOVER_ENV}.`,
+      );
+    }
+    await continueSession({ observedSessionId, projectDirectory, reason });
+  };
+
   const startBackend = async () => {
     const command = [
       "cd",
       JSON.stringify(runtimeDirectory),
       "&&",
-      `curl -fsS ${JSON.stringify(healthUrl)} >/dev/null 2>&1 ||`,
+      `curl -fsS ${JSON.stringify(healthUrl())} >/dev/null 2>&1 ||`,
       "nohup /bin/zsh ./scripts/start_demo_backend.sh >/tmp/lumon-backend.log 2>&1 &",
     ].join(" ");
     if ($) {
       debugTrace("startBackend.exec", { command });
       await $`/bin/zsh -lc ${command}`;
+      refreshOriginsFromRuntimeEnv();
       return true;
     }
     debugTrace("startBackend.no_shell_helper");
@@ -1114,15 +1819,15 @@ function createRuntimeHelpers({ $, directory, client, config }) {
   };
 
   const startFrontend = async () => {
-    if (frontendServedByBackend) {
-      debugTrace("startFrontend.skipped_backend_served", { frontendUrl, backendOrigin: config.backendOrigin });
+    if (frontendServedByBackend()) {
+      debugTrace("startFrontend.skipped_backend_served", { frontendUrl: getFrontendOrigin(), backendOrigin: getBackendOrigin() });
       return true;
     }
     const command = [
       "cd",
       JSON.stringify(runtimeDirectory),
       "&&",
-      `curl -fsS ${JSON.stringify(frontendUrl)} >/dev/null 2>&1 ||`,
+      `curl -fsS ${JSON.stringify(frontendReadyUrl())} >/dev/null 2>&1 ||`,
       "nohup /bin/zsh ./scripts/start_demo_frontend.sh >/tmp/lumon-frontend.log 2>&1 &",
     ].join(" ");
     if ($) {
@@ -1140,14 +1845,14 @@ function createRuntimeHelpers({ $, directory, client, config }) {
     await startFrontend();
     const frontendReady = await waitForFrontend();
     if (!frontendReady) {
-      throw new Error(`Lumon frontend did not become ready at ${frontendUrl}`);
+      throw new Error(`Lumon frontend did not become ready at ${getFrontendOrigin()}`);
     }
   };
 
   const openUrl = async (url) => {
     const opener = process.platform === "darwin" ? "open" : "xdg-open";
     debugTrace("openUrl.begin", { url, opener });
-    if (url.startsWith(frontendUrl)) {
+    if (url.startsWith(getFrontendOrigin())) {
       const frontendReachable = await fetchFrontendReady();
       if (!frontendReachable) {
         await log("Lumon frontend unavailable; starting it before opening the UI.");
@@ -1155,7 +1860,7 @@ function createRuntimeHelpers({ $, directory, client, config }) {
       }
       const frontendReady = await waitForFrontend();
       if (!frontendReady) {
-        throw new Error(`Lumon frontend did not become ready at ${frontendUrl}`);
+        throw new Error(`Lumon frontend did not become ready at ${getFrontendOrigin()}`);
       }
     }
     if ($) {
@@ -1169,7 +1874,21 @@ function createRuntimeHelpers({ $, directory, client, config }) {
     await log(`Open Lumon manually: ${url}`);
   };
 
-  return { attach, command, startApp, waitForHealth, openUrl, log, recordUiTelemetry, directory: runtimeDirectory };
+  refreshOriginsFromRuntimeEnv();
+
+  return {
+    attach,
+    command,
+    consumeResumeIntent,
+    acknowledgeResumeIntent,
+    continueSession: continueSessionWithTakeoverHint,
+    startApp,
+    waitForHealth,
+    openUrl,
+    log,
+    recordUiTelemetry,
+    directory: runtimeDirectory,
+  };
 }
 
 function createLumonBrowserTool({ config, helpers }) {
@@ -1202,6 +1921,26 @@ function createLumonBrowserTool({ config, helpers }) {
     helpers.activeBrowserTasks.delete(sessionId);
   };
 
+  const resolveTrackedSession = (stateKey, telemetrySessionId) => {
+    if (!helpers.sessions || typeof helpers.sessions.get !== "function") {
+      return null;
+    }
+    if (typeof stateKey === "string" && stateKey.trim().length > 0) {
+      const direct = helpers.sessions.get(stateKey);
+      if (direct) {
+        return direct;
+      }
+    }
+    if (typeof telemetrySessionId === "string" && telemetrySessionId.trim().length > 0) {
+      for (const session of helpers.sessions.values()) {
+        if (session?.lumonSessionId === telemetrySessionId) {
+          return session;
+        }
+      }
+    }
+    return null;
+  };
+
   const maybeOpenUrl = async ({ stateKey, telemetrySessionId, result, commandName, uiConnected = false }) => {
     const url = result?.open_url;
     if (typeof stateKey !== "string" || stateKey.trim().length === 0) {
@@ -1226,6 +1965,17 @@ function createLumonBrowserTool({ config, helpers }) {
 
     if (state.taskSequence === 0) {
       state.taskSequence = 1;
+    }
+
+    const trackedSession = resolveTrackedSession(stateKey, resolvedTelemetrySessionId);
+    if (isDirectTakeoverActiveContext(result, trackedSession)) {
+      void fireUiTelemetry({
+        sessionId: resolvedTelemetrySessionId,
+        event: "open_suppressed",
+        meta: { reason_code: "direct_takeover_mode", command: commandName },
+      });
+      sessionOpenState.set(stateKey, state);
+      return;
     }
 
     const alreadyVisible = uiConnected || visibleRuntimeSessions.has(resolvedTelemetrySessionId);
@@ -1441,6 +2191,23 @@ function createLumonBrowserTool({ config, helpers }) {
           } else if (result.ui_connected === false) {
             visibleRuntimeSessions.delete(result.session_id);
           }
+          if (typeof helpers.upsertSessionFromTool === "function") {
+            helpers.upsertSessionFromTool({
+              observedSessionId: resolvedSessionId,
+              lumonSessionId: result.session_id,
+              projectDirectory: resolvedProjectDirectory,
+              openUrl: result.open_url || null,
+              uiConnected: result.ui_connected === true,
+              takeoverMode:
+                result?.meta?.takeover_mode === "remote" || result?.meta?.takeover_mode === "direct"
+                  ? result.meta.takeover_mode
+                  : null,
+              takeoverUrl:
+                typeof result?.meta?.takeover_url === "string" && result.meta.takeover_url.trim().length > 0
+                  ? result.meta.takeover_url
+                  : null,
+            });
+          }
         }
         if (helpers.commandActivity) {
           helpers.commandActivity.set(repeatedKey, {
@@ -1450,6 +2217,12 @@ function createLumonBrowserTool({ config, helpers }) {
           });
         }
         if (args.command === "stop" && result?.status === "success") {
+          if (typeof helpers.markSessionStopped === "function") {
+            helpers.markSessionStopped(resolvedSessionId);
+            if (typeof helpers.stopAutoResumePollingIfIdle === "function") {
+              helpers.stopAutoResumePollingIfIdle();
+            }
+          }
           clearBrowserTaskActive(resolvedSessionId);
         }
         if (result?.open_url && shouldOpenForBrowserCommandResult(result)) {
@@ -1486,6 +2259,7 @@ function createLumonBrowserTool({ config, helpers }) {
             checkpoint_id: result.checkpoint_id ?? null,
             intervention_id: result.intervention_id ?? null,
             evidence: result.evidence ?? null,
+            meta: result.meta ?? {},
           },
           null,
           2,
@@ -1526,7 +2300,19 @@ export function createLumonPlugin(input) {
         await controller.handleEvent(event, directory);
       },
       tool: {
-        lumon_browser: createLumonBrowserTool({ config, helpers: { ...helpers, commandActivity, pendingPromptSteering, activeBrowserTasks } }),
+        lumon_browser: createLumonBrowserTool({
+          config,
+          helpers: {
+            ...helpers,
+            sessions: controller.sessions,
+            upsertSessionFromTool: controller.upsertSessionFromTool,
+            markSessionStopped: controller.markSessionStopped,
+            stopAutoResumePollingIfIdle: controller.stopAutoResumePollingIfIdle,
+            commandActivity,
+            pendingPromptSteering,
+            activeBrowserTasks,
+          },
+        }),
       },
       "tool.definition": async (input, output) => {
         if (input.toolID !== "lumon_browser") {

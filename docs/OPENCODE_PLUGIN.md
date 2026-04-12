@@ -45,6 +45,7 @@ Important product rules in the plugin:
 - verified browser command results with frame evidence can open Lumon
 - `begin_task` alone should not open Lumon
 - later successful commands in the same active browser run should not reopen the same Lumon tab
+- on takeover auto-resume, plugin foregrounds Lumon UI once to close the handoff loop
 
 ## Stale Runtime Protection
 The plugin checks `runtime_version` from `/healthz`.

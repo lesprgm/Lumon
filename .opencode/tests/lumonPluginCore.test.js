@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   attachWithAutoStart,
@@ -36,6 +39,16 @@ function okHealthResponse() {
   };
 }
 
+function okFrontendManifestPayload() {
+  return {
+    runtime_version: '2026-03-22-reliability-v1',
+    features: {
+      ui_telemetry: true,
+      ui_ready_handshake: true,
+    },
+  };
+}
+
 function okFrontendReadyResponse() {
   return {
     ok: true,
@@ -52,10 +65,10 @@ function okFrontendReadyResponse() {
   };
 }
 
-function okFrontendResponse() {
+function okFrontendManifestResponse() {
   return {
     ok: true,
-    text: async () => '<!doctype html><html><head><title>Lumon</title></head><body><div id="root"></div></body></html>',
+    json: async () => okFrontendManifestPayload(),
   };
 }
 
@@ -139,6 +152,17 @@ test('classifyOpenSignal distinguishes browser and intervention signals', () => 
   assert.equal(
     classifyOpenSignal({ type: 'session.diff', diff: 'status blocked pending approval' }),
     null,
+  );
+});
+
+test('classifyOpenSignal honors explicit lumon open-signal contracts before heuristics', () => {
+  assert.equal(
+    classifyOpenSignal({ type: 'message.updated', payload: { open_signal_type: 'browser' } }),
+    'browser',
+  );
+  assert.equal(
+    classifyOpenSignal({ type: 'message.updated', payload: { lumon_open_signal: 'intervention' } }),
+    'intervention',
   );
 });
 
@@ -406,6 +430,632 @@ test('controller can reopen faster for intervention episodes', async (t) => {
     'http://127.0.0.1:5173/?session_id=lumon_3',
     'http://127.0.0.1:5173/?session_id=lumon_3',
   ]);
+});
+
+test('controller auto-resumes once when takeover returns to running', async () => {
+  const continueCalls = [];
+  const consumeCalls = [];
+  const ackCalls = [];
+  const opens = [];
+  let consumeCount = 0;
+  const controller = createLumonController({
+    config: {
+      webMode: 'observe_only',
+      autoDelegate: false,
+      openPolicy: 'browser_or_intervention',
+      disableAutoStart: false,
+      browserEpisodeGapMs: 25000,
+      interventionEpisodeGapMs: 10000,
+      reopenCooldownMs: 20000,
+      autoResumeCooldownMs: 5000,
+    },
+    attach: async () => ({
+      session_id: 'lumon_resume',
+      open_url: 'http://127.0.0.1:5173/?session_id=lumon_resume',
+      already_attached: false,
+    }),
+    consumeResumeIntent: async ({ sessionId, afterSeq }) => {
+      consumeCalls.push({ sessionId, afterSeq });
+      consumeCount += 1;
+      if (consumeCount === 1) {
+        return {
+          session_id: sessionId,
+          pending: true,
+          resume_intent_seq: 1,
+          reason: 'takeover_returned_control',
+        };
+      }
+      return {
+        session_id: sessionId,
+        pending: false,
+        resume_intent_seq: 1,
+      };
+    },
+    acknowledgeResumeIntent: async ({ sessionId, resumeIntentSeq }) => {
+      ackCalls.push({ sessionId, resumeIntentSeq });
+      return { acknowledged: true, consumed_seq: resumeIntentSeq };
+    },
+    continueSession: async (payload) => {
+      continueCalls.push(payload);
+    },
+    startApp: async () => {},
+    waitForHealth: async () => {},
+    openUrl: async (url) => opens.push(url),
+    log: async () => {},
+  });
+
+  await controller.handleEvent({ type: 'session.created', session: { id: 'sess_resume' } }, '/repo');
+  await controller.handleEvent(
+    { type: 'tool.execute.after', session: { id: 'sess_resume' }, tool: { name: 'webfetch', url: 'https://example.com' } },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: {
+        id: 'sess_resume',
+        state: 'takeover',
+        takeover_mode: 'direct',
+        takeover_url: 'https://www.wikipedia.org/wiki/OpenAI',
+      },
+    },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_resume', state: 'running' },
+    },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_resume', state: 'running' },
+    },
+    '/repo',
+  );
+
+  assert.equal(continueCalls.length, 1);
+  assert.equal(continueCalls[0].observedSessionId, 'sess_resume');
+  assert.equal(continueCalls[0].takeoverMode, 'direct');
+  assert.equal(ackCalls.length, 1);
+  assert.equal(ackCalls[0].resumeIntentSeq, 1);
+  assert.equal(consumeCalls.length >= 1, true);
+  assert.deepEqual(opens, [
+    'http://127.0.0.1:5173/?session_id=lumon_resume',
+    'http://127.0.0.1:5173/?session_id=lumon_resume',
+  ]);
+});
+
+test('controller retries auto-resume when continue is busy', async () => {
+  const continueCalls = [];
+  const ackCalls = [];
+  let continueAttempt = 0;
+  const controller = createLumonController({
+    config: {
+      webMode: 'observe_only',
+      autoDelegate: false,
+      openPolicy: 'browser_or_intervention',
+      disableAutoStart: false,
+      browserEpisodeGapMs: 25000,
+      interventionEpisodeGapMs: 10000,
+      reopenCooldownMs: 20000,
+      autoResumeCooldownMs: 5000,
+      autoResumeBusyRetryMs: 0,
+      autoResumeBusyMaxRetries: 3,
+    },
+    attach: async () => ({
+      session_id: 'lumon_busy_resume',
+      open_url: 'http://127.0.0.1:5173/?session_id=lumon_busy_resume',
+      already_attached: false,
+    }),
+    consumeResumeIntent: async ({ sessionId }) => ({
+      session_id: sessionId,
+      pending: true,
+      resume_intent_seq: 1,
+      reason: 'takeover_returned_control',
+    }),
+    acknowledgeResumeIntent: async ({ sessionId, resumeIntentSeq }) => {
+      ackCalls.push({ sessionId, resumeIntentSeq });
+      return { acknowledged: true, consumed_seq: resumeIntentSeq };
+    },
+    continueSession: async (payload) => {
+      continueCalls.push(payload);
+      continueAttempt += 1;
+      if (continueAttempt < 3) {
+        throw new Error('Lumon is still finishing the previous browser step (busy)');
+      }
+    },
+    startApp: async () => {},
+    waitForHealth: async () => {},
+    openUrl: async () => {},
+    log: async () => {},
+  });
+
+  await controller.handleEvent({ type: 'session.created', session: { id: 'sess_busy_resume' } }, '/repo');
+  await controller.handleEvent(
+    { type: 'tool.execute.after', session: { id: 'sess_busy_resume' }, tool: { name: 'webfetch', url: 'https://example.com' } },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_busy_resume', state: 'takeover' },
+    },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_busy_resume', state: 'running' },
+    },
+    '/repo',
+  );
+
+  assert.equal(continueCalls.length, 3);
+  assert.equal(ackCalls.length, 1);
+  assert.equal(ackCalls[0].resumeIntentSeq, 1);
+});
+
+test('controller keeps pending resume intent when prompt fails then succeeds', async () => {
+  const consumeCalls = [];
+  const ackCalls = [];
+  let continueAttempt = 0;
+  let consumeIndex = 0;
+  const controller = createLumonController({
+    config: {
+      webMode: 'observe_only',
+      autoDelegate: false,
+      openPolicy: 'browser_or_intervention',
+      disableAutoStart: false,
+      browserEpisodeGapMs: 25000,
+      interventionEpisodeGapMs: 10000,
+      reopenCooldownMs: 20000,
+      resumeIntentPollMs: 100000,
+      autoResumeCooldownMs: 5000,
+      autoResumeBusyRetryMs: 0,
+      autoResumeBusyMaxRetries: 0,
+    },
+    attach: async () => ({
+      session_id: 'lumon_retry_resume',
+      open_url: 'http://127.0.0.1:5173/?session_id=lumon_retry_resume',
+      already_attached: false,
+    }),
+    consumeResumeIntent: async ({ sessionId, afterSeq }) => {
+      consumeCalls.push({ sessionId, afterSeq });
+      consumeIndex += 1;
+      if (consumeIndex <= 2) {
+        return {
+          session_id: sessionId,
+          pending: true,
+          resume_intent_seq: 2,
+          reason: 'takeover_returned_control',
+        };
+      }
+      return {
+        session_id: sessionId,
+        pending: false,
+        resume_intent_seq: 2,
+      };
+    },
+    acknowledgeResumeIntent: async ({ sessionId, resumeIntentSeq }) => {
+      ackCalls.push({ sessionId, resumeIntentSeq });
+      return { acknowledged: true, consumed_seq: resumeIntentSeq };
+    },
+    continueSession: async () => {
+      continueAttempt += 1;
+      if (continueAttempt === 1) {
+        throw new Error('prompt transport failed');
+      }
+    },
+    startApp: async () => {},
+    waitForHealth: async () => {},
+    openUrl: async () => {},
+    log: async () => {},
+  });
+
+  await controller.handleEvent({ type: 'session.created', session: { id: 'sess_retry_resume' } }, '/repo');
+  await controller.handleEvent(
+    { type: 'tool.execute.after', session: { id: 'sess_retry_resume' }, tool: { name: 'webfetch', url: 'https://example.com' } },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_retry_resume', state: 'takeover' },
+    },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_retry_resume', state: 'running' },
+    },
+    '/repo',
+  );
+
+  await controller.handleEvent(
+    {
+      type: 'message.part.updated',
+      session: { id: 'sess_retry_resume' },
+      content: 'new observer signal',
+    },
+    '/repo',
+  );
+
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_retry_resume', state: 'takeover' },
+    },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_retry_resume', state: 'running' },
+    },
+    '/repo',
+  );
+
+  assert.equal(continueAttempt, 2);
+  assert.equal(ackCalls.length, 1);
+  assert.equal(ackCalls[0].resumeIntentSeq, 2);
+  assert.equal(consumeCalls.length >= 2, true);
+  assert.equal(consumeCalls[1].afterSeq <= 1, true);
+});
+
+test('controller does not auto-resume after stop until next takeover', async () => {
+  const continueCalls = [];
+  const controller = createLumonController({
+    config: {
+      webMode: 'observe_only',
+      autoDelegate: false,
+      openPolicy: 'browser_or_intervention',
+      disableAutoStart: false,
+      browserEpisodeGapMs: 25000,
+      interventionEpisodeGapMs: 10000,
+      reopenCooldownMs: 20000,
+      autoResumeCooldownMs: 0,
+      autoResumeBusyRetryMs: 0,
+      autoResumeBusyMaxRetries: 0,
+    },
+    attach: async () => ({
+      session_id: 'lumon_stopped_resume',
+      open_url: 'http://127.0.0.1:5173/?session_id=lumon_stopped_resume',
+      already_attached: false,
+    }),
+    consumeResumeIntent: async ({ sessionId }) => ({
+      session_id: sessionId,
+      pending: true,
+      resume_intent_seq: 9,
+      reason: 'takeover_returned_control',
+    }),
+    acknowledgeResumeIntent: async () => ({ acknowledged: true, consumed_seq: 9 }),
+    continueSession: async (payload) => {
+      continueCalls.push(payload);
+    },
+    startApp: async () => {},
+    waitForHealth: async () => {},
+    openUrl: async () => {},
+    log: async () => {},
+  });
+
+  await controller.handleEvent({ type: 'session.created', session: { id: 'sess_stopped_resume' } }, '/repo');
+  await controller.handleEvent(
+    { type: 'tool.execute.after', session: { id: 'sess_stopped_resume' }, tool: { name: 'webfetch', url: 'https://example.com' } },
+    '/repo',
+  );
+  controller.markSessionStopped('sess_stopped_resume');
+
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_stopped_resume', state: 'running' },
+    },
+    '/repo',
+  );
+  assert.equal(continueCalls.length, 0);
+
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_stopped_resume', state: 'takeover' },
+    },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_stopped_resume', state: 'running' },
+    },
+    '/repo',
+  );
+  assert.equal(continueCalls.length, 1);
+});
+
+test('controller clears session on resume 404 and can reattach later', async () => {
+  const attaches = [];
+  const continueCalls = [];
+  let consumeStep = 0;
+  const controller = createLumonController({
+    config: {
+      webMode: 'observe_only',
+      autoDelegate: false,
+      openPolicy: 'browser_or_intervention',
+      disableAutoStart: false,
+      browserEpisodeGapMs: 25000,
+      interventionEpisodeGapMs: 10000,
+      reopenCooldownMs: 20000,
+      autoResumeCooldownMs: 0,
+      autoResumeBusyRetryMs: 0,
+      autoResumeBusyMaxRetries: 0,
+    },
+    attach: async (payload) => {
+      attaches.push(payload.observed_session_id);
+      return {
+        session_id: 'lumon_reconnect_resume',
+        open_url: 'http://127.0.0.1:5173/?session_id=lumon_reconnect_resume',
+        already_attached: false,
+      };
+    },
+    consumeResumeIntent: async ({ sessionId }) => {
+      consumeStep += 1;
+      if (consumeStep === 1) {
+        throw new Error('consume resume intent failed (404): Session not found');
+      }
+      return {
+        session_id: sessionId,
+        pending: true,
+        resume_intent_seq: 4,
+        reason: 'takeover_returned_control',
+      };
+    },
+    acknowledgeResumeIntent: async () => ({ acknowledged: true, consumed_seq: 4 }),
+    continueSession: async (payload) => {
+      continueCalls.push(payload);
+    },
+    startApp: async () => {},
+    waitForHealth: async () => {},
+    openUrl: async () => {},
+    log: async () => {},
+  });
+
+  await controller.handleEvent({ type: 'session.created', session: { id: 'sess_reconnect_resume' } }, '/repo');
+  await controller.handleEvent(
+    { type: 'tool.execute.after', session: { id: 'sess_reconnect_resume' }, tool: { name: 'webfetch', url: 'https://example.com' } },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_reconnect_resume', state: 'takeover' },
+    },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_reconnect_resume', state: 'running' },
+    },
+    '/repo',
+  );
+
+  await controller.handleEvent(
+    { type: 'tool.execute.after', session: { id: 'sess_reconnect_resume' }, tool: { name: 'webfetch', url: 'https://example.com/next' } },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_reconnect_resume', state: 'takeover' },
+    },
+    '/repo',
+  );
+  await controller.handleEvent(
+    {
+      type: 'session.state',
+      session: { id: 'sess_reconnect_resume', state: 'running' },
+    },
+    '/repo',
+  );
+
+  assert.equal(attaches.length >= 2, true);
+  assert.equal(continueCalls.length, 1);
+});
+
+test('controller coalesces rapid repeated handoff intents to latest sequence', async () => {
+  const continueCalls = [];
+  const ackCalls = [];
+  let intentSeq = 11;
+  const controller = createLumonController({
+    config: {
+      webMode: 'observe_only',
+      autoDelegate: false,
+      openPolicy: 'browser_or_intervention',
+      disableAutoStart: false,
+      browserEpisodeGapMs: 25000,
+      interventionEpisodeGapMs: 10000,
+      reopenCooldownMs: 20000,
+      resumeIntentPollMs: 100000,
+      autoResumeCooldownMs: 0,
+      autoResumeBusyRetryMs: 0,
+      autoResumeBusyMaxRetries: 0,
+    },
+    attach: async () => ({
+      session_id: 'lumon_coalesce_resume',
+      open_url: 'http://127.0.0.1:5173/?session_id=lumon_coalesce_resume',
+      already_attached: false,
+    }),
+    consumeResumeIntent: async ({ sessionId }) => {
+      intentSeq += 1;
+      return {
+        session_id: sessionId,
+        pending: true,
+        resume_intent_seq: intentSeq,
+        reason: 'takeover_returned_control',
+      };
+    },
+    acknowledgeResumeIntent: async ({ sessionId, resumeIntentSeq }) => {
+      ackCalls.push({ sessionId, resumeIntentSeq });
+      return { acknowledged: true, consumed_seq: resumeIntentSeq };
+    },
+    continueSession: async (payload) => {
+      continueCalls.push(payload);
+    },
+    startApp: async () => {},
+    waitForHealth: async () => {},
+    openUrl: async () => {},
+    log: async () => {},
+  });
+
+  await controller.handleEvent({ type: 'session.created', session: { id: 'sess_coalesce_resume' } }, '/repo');
+  await controller.handleEvent(
+    { type: 'tool.execute.after', session: { id: 'sess_coalesce_resume' }, tool: { name: 'webfetch', url: 'https://example.com' } },
+    '/repo',
+  );
+
+  await controller.handleEvent(
+    { type: 'session.state', session: { id: 'sess_coalesce_resume', state: 'takeover' } },
+    '/repo',
+  );
+  await controller.handleEvent(
+    { type: 'session.state', session: { id: 'sess_coalesce_resume', state: 'running' } },
+    '/repo',
+  );
+  await controller.handleEvent(
+    { type: 'session.state', session: { id: 'sess_coalesce_resume', state: 'takeover' } },
+    '/repo',
+  );
+  await controller.handleEvent(
+    { type: 'session.state', session: { id: 'sess_coalesce_resume', state: 'running' } },
+    '/repo',
+  );
+
+  assert.equal(continueCalls.length, 2);
+  assert.equal(ackCalls.length, 2);
+  assert.equal(ackCalls[0].resumeIntentSeq, 12);
+  assert.equal(ackCalls[1].resumeIntentSeq, 13);
+});
+
+test('auto-resume prompt uses status-first drift-check guidance', async (t) => {
+  const previous = process.env.LUMON_PLUGIN_ENABLE_PROMPT_STEERING;
+  process.env.LUMON_PLUGIN_ENABLE_PROMPT_STEERING = 'true';
+
+  const promptAsyncCalls = [];
+  const ackCalls = [];
+  const consumeBodies = [];
+  const originalFetch = global.fetch;
+
+  global.fetch = async (url, options) => {
+    const asText = String(url);
+    if (asText.endsWith('/healthz')) {
+      return okHealthResponse();
+    }
+    if (asText.endsWith('/api/local/observe/opencode')) {
+      return {
+        ok: true,
+        json: async () => ({
+          session_id: 'lumon_resume_prompt',
+          open_url: 'http://127.0.0.1:5173/?session_id=lumon_resume_prompt',
+          already_attached: false,
+        }),
+      };
+    }
+    if (asText.endsWith('/api/local/session/lumon_resume_prompt/consume-resume-intent')) {
+      const body = JSON.parse(options.body);
+      consumeBodies.push(body);
+      if (body.after_seq === 0) {
+        return {
+          ok: true,
+          json: async () => ({
+            session_id: 'lumon_resume_prompt',
+            pending: true,
+            resume_intent_seq: 1,
+            reason: 'takeover_returned_control',
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          session_id: 'lumon_resume_prompt',
+          pending: false,
+          resume_intent_seq: 1,
+        }),
+      };
+    }
+    if (asText.endsWith('/api/local/session/lumon_resume_prompt/ui-telemetry')) {
+      return { ok: true, json: async () => ({ ok: true }) };
+    }
+    if (asText.endsWith('/api/local/session/lumon_resume_prompt/ack-resume-intent')) {
+      ackCalls.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ acknowledged: true, consumed_seq: 1 }) };
+    }
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
+    }
+    throw new Error(`unexpected fetch ${asText}`);
+  };
+
+  const plugin = await createLumonPlugin({
+    $: async () => {},
+    directory: '/repo',
+    worktree: '/repo',
+    serverUrl: new URL('http://127.0.0.1:59207'),
+    project: { id: 'proj_1' },
+    client: {
+      app: { log: async () => {} },
+      session: {
+        promptAsync: async (payload) => {
+          promptAsyncCalls.push(payload);
+        },
+      },
+    },
+  });
+
+  await plugin.event({ event: { type: 'session.created', session: { id: 'sess_resume_prompt' } } });
+  await plugin.event({
+    event: {
+      type: 'tool.execute.after',
+      session: { id: 'sess_resume_prompt' },
+      tool: { name: 'webfetch', url: 'https://example.com' },
+    },
+  });
+  await plugin.event({
+    event: {
+      type: 'session.state',
+      session: { id: 'sess_resume_prompt', state: 'takeover' },
+    },
+  });
+  await plugin.event({
+    event: {
+      type: 'session.state',
+      session: { id: 'sess_resume_prompt', state: 'running' },
+    },
+  });
+
+  assert.equal(promptAsyncCalls.length, 1);
+  const promptPayload = promptAsyncCalls[0];
+  assert.equal(promptPayload.path.id, 'sess_resume_prompt');
+  assert.equal(promptPayload.body.tools.lumon_browser, true);
+  assert.equal(promptPayload.body.tools.webfetch, false);
+  assert.equal(
+    promptPayload.body.parts[0].text.includes('command="status" exactly once'),
+    true,
+  );
+  assert.equal(promptPayload.body.parts[0].metadata.lumon_resume_strategy, 'status_first');
+  assert.equal(ackCalls.length, 1);
+  assert.equal(ackCalls[0].resume_intent_seq, 1);
+  assert.equal(consumeBodies[0].consume, false);
+
+  global.fetch = originalFetch;
+  if (previous === undefined) {
+    delete process.env.LUMON_PLUGIN_ENABLE_PROMPT_STEERING;
+  } else {
+    process.env.LUMON_PLUGIN_ENABLE_PROMPT_STEERING = previous;
+  }
 });
 
 test('controller suppresses observer-driven browser reopen while tool-backed browser activity is recent', async (t) => {
@@ -745,6 +1395,79 @@ test('lumon_browser auto-start launches the backend-served frontend before retry
   assert.equal(shellCommands.some((entry) => entry.includes('./scripts/start_demo_frontend.sh')), false);
 });
 
+test('lumon_browser follows the backend port written by startup runtime env', async (t) => {
+  const runtimeDirectory = await mkdtemp(join(tmpdir(), 'lumon-plugin-runtime-'));
+  const runtimeEnvDirectory = join(runtimeDirectory, 'output', 'runtime');
+  await mkdir(runtimeEnvDirectory, { recursive: true });
+
+  const shellCommands = [];
+  const fetchUrls = [];
+  const originalFetch = global.fetch;
+  let successfulCommandAttempts = 0;
+
+  global.fetch = async (url) => {
+    const asText = String(url);
+    fetchUrls.push(asText);
+    if (asText === 'http://127.0.0.1:8123/healthz') {
+      return okHealthResponse();
+    }
+    if (asText === 'http://127.0.0.1:8123/__lumon_frontend_ready__') {
+      return okFrontendReadyResponse();
+    }
+    if (asText === 'http://127.0.0.1:8123/api/local/opencode/browser/command') {
+      successfulCommandAttempts += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          command_id: 'cmd_shifted',
+          command: 'open',
+          status: 'success',
+          summary_text: 'Opened page.',
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch ${asText}`);
+  };
+
+  t.after(async () => {
+    global.fetch = originalFetch;
+  });
+
+  const shellHelper = async (strings, ...values) => {
+    const command = String.raw({ raw: strings }, ...values);
+    shellCommands.push(command);
+    if (command.includes('./scripts/start_demo_backend.sh')) {
+      await writeFile(
+        join(runtimeEnvDirectory, 'lumon_backend.env'),
+        'LUMON_BACKEND_PORT=8123\nVITE_LUMON_BACKEND_ORIGIN=http://127.0.0.1:8123\n',
+        'utf8',
+      );
+    }
+  };
+
+  const plugin = await createLumonPlugin({
+    $: shellHelper,
+    directory: runtimeDirectory,
+    worktree: runtimeDirectory,
+    serverUrl: new URL('http://127.0.0.1:59207'),
+    project: { id: 'proj_1' },
+    client: { app: { log: async () => {} } },
+  });
+
+  const result = await plugin.tool.lumon_browser.execute(
+    { command_id: 'cmd_shifted', command: 'open', url: 'https://www.wikipedia.org' },
+    { sessionID: 'sess_shifted', directory: runtimeDirectory, metadata: () => {} },
+  );
+
+  const parsed = JSON.parse(result);
+  assert.equal(parsed.status, 'success');
+  assert.equal(successfulCommandAttempts, 1);
+  assert.equal(fetchUrls.includes('http://127.0.0.1:8000/healthz'), true);
+  assert.equal(fetchUrls.includes('http://127.0.0.1:8123/healthz'), true);
+  assert.equal(fetchUrls.includes('http://127.0.0.1:8123/api/local/opencode/browser/command'), true);
+  assert.ok(shellCommands.some((entry) => entry.includes('./scripts/start_demo_backend.sh')));
+});
+
 test('intervention episode opens the backend-served Lumon UI when backend is already up', async (t) => {
   const shellCommands = [];
   const originalFetch = global.fetch;
@@ -842,8 +1565,8 @@ test('lumon_browser suppresses observer-driven open while begin_task is still in
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -935,8 +1658,8 @@ test('lumon_browser opens the UI only when a command returns frame evidence', as
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -989,8 +1712,8 @@ test('lumon_browser opens the UI from begin_task once frame evidence exists', as
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -1060,8 +1783,8 @@ test('blocked command does not reopen the already-open Lumon UI for the same tas
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -1126,8 +1849,8 @@ test('lumon_browser keeps a successful command successful when UI auto-open fail
         }),
       };
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -1202,8 +1925,8 @@ test('lumon_browser does not reopen the same Lumon session on later successful c
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -1243,6 +1966,92 @@ test('lumon_browser does not reopen the same Lumon session on later successful c
   assert.equal(openCommands.length, 1);
 });
 
+test('lumon_browser suppresses UI auto-open in direct takeover mode only', async (t) => {
+  const shellCommands = [];
+  const originalFetch = global.fetch;
+
+  global.fetch = async (url, options) => {
+    const asText = String(url);
+    if (asText.endsWith('/api/local/opencode/browser/command')) {
+      const body = JSON.parse(options.body);
+      if (body.command === 'begin_task') {
+        return {
+          ok: true,
+          json: async () => ({
+            command_id: 'cmd_begin_direct',
+            command: 'begin_task',
+            status: 'success',
+            summary_text: 'Direct takeover session ready.',
+            open_url: 'http://127.0.0.1:5173/?session_id=lumon_direct',
+            session_id: 'lumon_direct',
+            ui_connected: false,
+            evidence: { frame_emitted: true, verified: true },
+            meta: { takeover_mode: 'direct', takeover_url: 'https://www.wikipedia.org/wiki/OpenAI', session_state: 'takeover' },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          command_id: 'cmd_status_remote',
+          command: 'status',
+          status: 'success',
+          summary_text: 'Remote mode status.',
+          open_url: 'http://127.0.0.1:5173/?session_id=lumon_remote',
+          session_id: 'lumon_remote',
+          ui_connected: false,
+          evidence: { frame_emitted: true, verified: true },
+          meta: { takeover_mode: 'remote' },
+        }),
+      };
+    }
+    if (asText.endsWith('/healthz')) {
+      return okHealthResponse();
+    }
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
+    }
+    throw new Error(`unexpected fetch ${asText}`);
+  };
+
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  const shellHelper = async (strings, ...values) => {
+    shellCommands.push(String.raw({ raw: strings }, ...values));
+  };
+
+  const plugin = await createLumonPlugin({
+    $: shellHelper,
+    directory: '/repo',
+    worktree: '/repo',
+    serverUrl: new URL('http://127.0.0.1:59207'),
+    project: { id: 'proj_1' },
+    client: { app: { log: async () => {} } },
+  });
+
+  await plugin.tool.lumon_browser.execute(
+    { command_id: 'cmd_begin_direct', command: 'begin_task', task_text: 'Direct takeover task' },
+    { sessionID: 'sess_direct', directory: '/repo', metadata: () => {} },
+  );
+
+  const directOpenCommands = shellCommands.filter((entry) =>
+    entry.includes('open "http://127.0.0.1:5173/?session_id=lumon_direct"'),
+  );
+  assert.equal(directOpenCommands.length, 0);
+
+  await plugin.tool.lumon_browser.execute(
+    { command_id: 'cmd_status_remote', command: 'status' },
+    { sessionID: 'sess_remote', directory: '/repo', metadata: () => {} },
+  );
+
+  const remoteOpenCommands = shellCommands.filter((entry) =>
+    entry.includes('open "http://127.0.0.1:5173/?session_id=lumon_remote"'),
+  );
+  assert.equal(remoteOpenCommands.length, 1);
+});
+
 test('lumon_browser hard-fails repeated frame_missing results to break model-side retry loops', async (t) => {
   const originalFetch = global.fetch;
   let attempts = 0;
@@ -1268,8 +2077,8 @@ test('lumon_browser hard-fails repeated frame_missing results to break model-sid
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -1345,8 +2154,8 @@ test('lumon_browser resets frame-missing retry state on a new begin_task', async
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };
@@ -1411,8 +2220,8 @@ test('lumon_browser uses distinct fallback session ids when tool context omits t
     if (asText.endsWith('/healthz')) {
       return okHealthResponse();
     }
-    if (asText === 'http://127.0.0.1:5173') {
-      return okFrontendResponse();
+    if (asText === 'http://127.0.0.1:5173/lumon-runtime.json') {
+      return okFrontendManifestResponse();
     }
     throw new Error(`unexpected fetch ${asText}`);
   };

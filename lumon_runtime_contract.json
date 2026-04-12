@@ -1,0 +1,12 @@
+{
+  "runtime_version": "2026-03-22-reliability-v1",
+  "backend_runtime_features": {
+    "ui_telemetry": true,
+    "ui_ready_handshake": true,
+    "live_artifact_persistence": true
+  },
+  "frontend_features": {
+    "ui_telemetry": true,
+    "ui_ready_handshake": true
+  }
+}

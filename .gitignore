@@ -67,3 +67,15 @@ backend/.mypy_cache/
 /notes/
 /backend/app/adapters/*.bak
 /scripts/harness_*.py
+/.netlify/
+/frontend/.netlify/
+/.wrangler/
+/frontend/dist-landing/
+/frontend/public/lumon.png
+/0322.mp4
+/frontend/public/landing/
+/frontend/src/landing/
+/frontend/src/RootApp.tsx
+/frontend/src/RootApp.test.tsx
+/frontend/scripts/
+/netlify.toml

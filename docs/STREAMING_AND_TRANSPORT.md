@@ -63,6 +63,14 @@ Relevant behavior:
 - `frame` messages still exist as the non-WebRTC fallback path
 - `push_webrtc_frame_bytes()` is the direct live transport feed into aiortc
 
+Takeover-specific behavior:
+- direct takeover (`takeover_mode=direct`) pauses Lumon live stream transport while
+  user controls the real browser window
+- remote takeover (`takeover_mode=remote`) forces fresh snapshot/context emission on
+  takeover entry/return so the in-app stage does not appear blank
+- frontend shows a short "Restoring live feed..." indicator during remote takeover
+  when context is known but a fresh frame has not landed yet
+
 ### `WebRTCSession`
 File:
 - `backend/app/streaming/webrtc.py`

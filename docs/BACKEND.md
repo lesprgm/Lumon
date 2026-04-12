@@ -69,6 +69,12 @@ Responsibilities:
 - emit snapshot frames and browser context updates
 - enforce idempotency, busy locking, stale target rejection, and approval blocking
 
+Takeover transport behavior:
+- entering `takeover_mode=remote` forces a fresh frame + browser-context update so
+  Lumon stage remains populated after switching from direct takeover back to in-app control
+- returning control from remote takeover also forces a fresh frame emission before
+  session resumes in `running`
+
 ## Browser Command Path
 Models live in `backend/app/protocol/models.py`.
 
