@@ -3,7 +3,7 @@
 BACKEND_PYTHON := $(shell if [ -x backend/.venv/bin/python ]; then echo backend/.venv/bin/python; else echo python3; fi)
 
 backend:
-	cd backend && $(BACKEND_PYTHON) -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+	cd backend && $(BACKEND_PYTHON) -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --loop uvloop --limit-concurrency 100 --backlog 2048 --ws-ping-interval 5 --ws-max-size 1048576
 
 frontend:
 	cd frontend && npm run dev

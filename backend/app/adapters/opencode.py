@@ -14,6 +14,12 @@ from typing import Any, Literal
 
 from app.adapters.base import AdapterConnector
 from app.opencode_signals import classify_signal_detailed, task_mentions_browser
+from app.config import (
+    TYPE_FALLBACK_TARGET_HEIGHT,
+    TYPE_FALLBACK_TARGET_WIDTH,
+    VIEWPORT_HEIGHT,
+    VIEWPORT_WIDTH,
+)
 from app.protocol.enums import ErrorCode, SessionState
 from app.protocol.models import BrowserCommandRecord, BrowserCommandRequest
 from app.protocol.normalizer import normalize_external_event
@@ -22,7 +28,7 @@ from app.utils.ids import new_id
 WebBridgeId = Literal["playwright_native"]
 WebModeId = Literal["observe_only", "delegate_playwright"]
 COMMAND_DELEGATE_READY_TIMEOUT_SECONDS = float(
-    os.getenv("LUMON_COMMAND_DELEGATE_READY_TIMEOUT_SECONDS", "45")
+    os.getenv("LUMON_COMMAND_DELEGATE_READY_TIMEOUT_SECONDS", "15")
 )
 
 _URL_PATTERN = re.compile(r"https?://[^\s)>\"]+")
@@ -61,6 +67,7 @@ class OpenCodeConnector(AdapterConnector):
         self.bridge_runtime: _BridgeRuntimeProxy | None = None
         self.bridge_completion: asyncio.Event | None = None
         self.bridge_result: tuple[str, str] | None = None
+        self._bridge_start_task: asyncio.Task[None] | None = None
         self.auto_delegate = False
 
     @property
@@ -615,11 +622,12 @@ class OpenCodeConnector(AdapterConnector):
             )
         )
         await self.runtime.emit_session_state()
-        await self.bridge_connector.start_task(
-            bridge_task_text,
-            demo_mode=demo_mode,
-            web_mode=self.selected_web_mode,
-            bridge_context=bridge_context,
+        self._bridge_start_task = asyncio.create_task(
+            self._run_bridge_start(
+                bridge_task_text,
+                demo_mode=demo_mode,
+                bridge_context=bridge_context,
+            )
         )
 
     async def ensure_browser_delegate(
@@ -756,6 +764,31 @@ class OpenCodeConnector(AdapterConnector):
             }
         )
 
+    async def _run_bridge_start(
+        self,
+        bridge_task_text: str,
+        *,
+        demo_mode: bool,
+        bridge_context: dict[str, Any],
+    ) -> None:
+        try:
+            await self.bridge_connector.start_task(
+                bridge_task_text,
+                demo_mode=demo_mode,
+                web_mode=self.selected_web_mode,
+                bridge_context=bridge_context,
+            )
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self._emit_runtime_decision(
+                reason_code="bridge_start_exception",
+                summary_text="Bridge start raised an exception",
+                severity="error",
+                error=str(exc),
+            )
+            await self._stop_bridge()
+
     async def _wait_for_bridge_completion(self) -> tuple[str, str] | None:
         if self.bridge_completion is None:
             return None
@@ -781,6 +814,14 @@ class OpenCodeConnector(AdapterConnector):
     async def _on_bridge_complete(self, status: str, summary_text: str) -> None:
         self.bridge_result = (status, summary_text)
         bridge_completion = self.bridge_completion
+        if (
+            self.bridge_connector is not None
+            and getattr(self.bridge_connector, "takeover_mode", None) is not None
+        ):
+            try:
+                await self.bridge_connector.end_takeover()
+            except Exception:
+                pass
         self.bridge_connector = None
         self.bridge_runtime = None
         self.active_web_bridge = None
@@ -822,6 +863,9 @@ class OpenCodeConnector(AdapterConnector):
 
     async def _stop_bridge(self) -> None:
         self.pending_bridge_offer = None
+        if self._bridge_start_task is not None and not self._bridge_start_task.done():
+            self._bridge_start_task.cancel()
+        self._bridge_start_task = None
         if self.bridge_connector is not None:
             await self.bridge_connector.stop()
         if self.bridge_completion is not None and not self.bridge_completion.is_set():
@@ -1126,6 +1170,24 @@ class OpenCodeConnector(AdapterConnector):
             str(event_type), raw_tool_name=raw_tool_name
         )
 
+        cursor = raw.get("cursor")
+        target_rect = raw.get("target_rect")
+        if mapped_action_type in (
+            "type",
+            "click",
+        ) and cursor is None and target_rect is None:
+            cx = VIEWPORT_WIDTH // 2
+            cy = VIEWPORT_HEIGHT // 2
+            cursor = {"x": cx, "y": cy}
+            fw = TYPE_FALLBACK_TARGET_WIDTH
+            fh = TYPE_FALLBACK_TARGET_HEIGHT
+            target_rect = {
+                "x": max(0, min(VIEWPORT_WIDTH - fw, cx - fw // 2)),
+                "y": max(0, min(VIEWPORT_HEIGHT - fh, cy - fh // 2)),
+                "width": fw,
+                "height": fh,
+            }
+
         return normalize_external_event(
             {
                 "event_type": mapped_action_type,
@@ -1133,8 +1195,8 @@ class OpenCodeConnector(AdapterConnector):
                 "summary_text": summary,
                 "intent": clean_raw_tool_call(str(raw.get("intent") or "")) or summary,
                 "risk_level": raw.get("risk_level", "none"),
-                "cursor": raw.get("cursor"),
-                "target_rect": raw.get("target_rect"),
+                "cursor": cursor,
+                "target_rect": target_rect,
                 "meta": meta,
                 "subagent": bool(raw.get("subagent")),
                 "agent_id": raw.get("agent_id", "main_001"),

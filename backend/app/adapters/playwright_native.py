@@ -13,6 +13,7 @@ from itertools import count
 from typing import Any, Literal
 
 from app.adapters.base import AdapterConnector
+from app.adapters.browser_pool import get_browser_pool
 from app.browser.actions import BrowserActionLayer
 from app.browser.demo_pages import backup_demo_html, primary_demo_html
 from app.browser.screencast import CDPScreencastStreamer, ScreenshotPollStreamer
@@ -55,7 +56,7 @@ _URL_PATTERN = re.compile(
     r"(https?://[^\s)>\"]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s)]*)?)", re.IGNORECASE
 )
 COMMAND_READY_TIMEOUT_SECONDS = float(
-    os.getenv("LUMON_COMMAND_READY_TIMEOUT_SECONDS", "45")
+    os.getenv("LUMON_COMMAND_READY_TIMEOUT_SECONDS", "15")
 )
 
 
@@ -205,6 +206,7 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.demo_variant: DemoVariant = self._configured_demo_variant()
         self.action_layer: BrowserActionLayer | None = None
         self.bridge_context: dict[str, Any] = {}
+        self._using_pool = False
         self.command_mode = False
         self.command_ready = asyncio.Event()
         self.command_stop_event = asyncio.Event()
@@ -1772,10 +1774,16 @@ class PlaywrightNativeConnector(AdapterConnector):
         self.capabilities["supports_direct_takeover"] = bool(
             self.command_mode or not headless
         )
-        if self.playwright is None:
-            self.playwright = await async_playwright().start()
-        assert self.playwright is not None
-        self.browser = await self.playwright.chromium.launch(headless=headless)
+        pool = get_browser_pool()
+        if pool is not None and headless:
+            self._using_pool = True
+            self.playwright, self.browser = await pool.get_instance()
+        else:
+            self._using_pool = False
+            if self.playwright is None:
+                self.playwright = await async_playwright().start()
+            assert self.playwright is not None
+            self.browser = await self.playwright.chromium.launch(headless=headless)
         context_options: dict[str, Any] = {}
         if headless:
             context_options["device_scale_factor"] = self._resolve_device_scale_factor()
@@ -2226,10 +2234,10 @@ class PlaywrightNativeConnector(AdapterConnector):
         if self.context is not None:
             await self.context.close()
             self.context = None
-        if self.browser is not None:
+        if self.browser is not None and not self._using_pool:
             await self.browser.close()
             self.browser = None
-        if stop_playwright and self.playwright is not None:
+        if stop_playwright and self.playwright is not None and not self._using_pool:
             await self.playwright.stop()
             self.playwright = None
         self.page = None
@@ -2617,8 +2625,7 @@ class PlaywrightNativeConnector(AdapterConnector):
             try:
                 await self._close_browser_runtime(stop_playwright=False)
                 await self._ensure_browser_runtime_launched(
-                    headless=True,
-                    start_stream_transport=True,
+                    headless=True, start_stream_transport=True,
                 )
                 relaunched_remote = True
             except Exception as exc:
@@ -2630,6 +2637,11 @@ class PlaywrightNativeConnector(AdapterConnector):
                     ),
                     command_type="end_takeover",
                 )
+            if self.page is None and not relaunched_remote:
+                self.takeover_mode = "remote"
+                self._headless = True
+                await self.runtime.transition_to(SessionState.FAILED, checkpoint_id=None)
+                return
             if relaunched_remote and preserve_url and self.page is not None:
                 with contextlib.suppress(Exception):
                     await self.page.goto(preserve_url, wait_until="domcontentloaded")

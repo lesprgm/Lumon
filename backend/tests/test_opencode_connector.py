@@ -650,6 +650,8 @@ async def test_opencode_prevents_duplicate_bridge_launches(
     await connector._launch_web_bridge(
         trigger, "Search the web for docs", demo_mode=False
     )
+    if connector._bridge_start_task is not None:
+        await asyncio.sleep(0)
     await connector._launch_web_bridge(
         trigger, "Search the web for docs", demo_mode=False
     )
@@ -714,6 +716,91 @@ def test_opencode_normalizes_browser_search_events() -> None:
     assert normalized["action_type"] == "navigate"
     assert normalized["summary_text"] == "Searching the web for hotel options"
     assert normalized["adapter_id"] == "opencode"
+
+
+def test_opencode_normalize_synthesizes_rect_for_type() -> None:
+    runtime = FakeRuntime()
+    connector = OpenCodeConnector(runtime)
+
+    normalized = connector._normalize_opencode_event(
+        {
+            "type": "type",
+            "state": "typing",
+            "summary": "Typing into search box",
+            "intent": "Fill in search query",
+            "meta": {"tool_name": "lumon_browser"},
+        }
+    )
+
+    assert normalized["action_type"] == "type"
+    assert normalized["cursor"] is not None
+    assert normalized["cursor"]["x"] == 960
+    assert normalized["cursor"]["y"] == 540
+    assert normalized["target_rect"] is not None
+    assert normalized["target_rect"]["width"] == 220
+    assert normalized["target_rect"]["height"] == 40
+    assert normalized["target_rect"]["x"] == 850
+    assert normalized["target_rect"]["y"] == 520
+
+
+def test_opencode_normalize_synthesizes_rect_for_click() -> None:
+    runtime = FakeRuntime()
+    connector = OpenCodeConnector(runtime)
+
+    normalized = connector._normalize_opencode_event(
+        {
+            "type": "click",
+            "state": "clicking",
+            "summary": "Clicking submit button",
+            "intent": "Submit the form",
+            "meta": {"tool_name": "lumon_browser"},
+        }
+    )
+
+    assert normalized["action_type"] == "click"
+    assert normalized["cursor"] is not None
+    assert normalized["cursor"]["x"] == 960
+    assert normalized["cursor"]["y"] == 540
+    assert normalized["target_rect"] is not None
+
+
+def test_opencode_normalize_passes_through_existing_rect() -> None:
+    runtime = FakeRuntime()
+    connector = OpenCodeConnector(runtime)
+
+    normalized = connector._normalize_opencode_event(
+        {
+            "type": "type",
+            "state": "typing",
+            "summary": "Typing into search box",
+            "intent": "Fill in search query",
+            "cursor": {"x": 100, "y": 200},
+            "target_rect": {"x": 80, "y": 180, "width": 40, "height": 30},
+            "meta": {"tool_name": "lumon_browser"},
+        }
+    )
+
+    assert normalized["action_type"] == "type"
+    assert normalized["cursor"] == {"x": 100, "y": 200}
+    assert normalized["target_rect"] == {"x": 80, "y": 180, "width": 40, "height": 30}
+
+
+def test_opencode_normalize_does_not_synthesize_for_non_type_click() -> None:
+    runtime = FakeRuntime()
+    connector = OpenCodeConnector(runtime)
+
+    normalized = connector._normalize_opencode_event(
+        {
+            "type": "browser.search",
+            "state": "navigating",
+            "summary": "Navigating to a URL",
+            "intent": "Go to example.com",
+        }
+    )
+
+    assert normalized["action_type"] == "navigate"
+    assert normalized["cursor"] is None
+    assert normalized["target_rect"] is None
 
 
 @pytest.mark.asyncio
@@ -841,6 +928,7 @@ async def test_opencode_observer_event_updates_task_text_and_emits_delegation_of
     ]
     assert runtime.events[-1]["summary_text"] == "OpenCode started a browser search"
     await connector.accept_bridge()
+    await asyncio.sleep(0)
     assert create_calls == ["Search the web for Lumon docs"]
 
 
@@ -913,6 +1001,7 @@ async def test_opencode_observer_auto_delegate_launches_bridge_without_offer(
         meta={"browser_candidate": True},
     )
 
+    await asyncio.sleep(0)
     assert create_calls == ["Search the web for Lumon docs"]
     assert runtime.bridge_offers == []
     assert connector.pending_bridge_offer is None
@@ -1073,6 +1162,7 @@ async def test_opencode_bridge_passes_source_url_context(
             "output_preview": "Fetched https://playwright.dev/docs/api/class-page successfully",
         },
     )
+    await asyncio.sleep(0)
 
     assert bridge_tasks == [
         "Open and inspect this exact URL in the browser: https://playwright.dev/docs/api/class-page"

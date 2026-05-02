@@ -6,7 +6,12 @@ import urllib.parse
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from app.config import VIEWPORT_HEIGHT, VIEWPORT_WIDTH
+from app.config import (
+    TYPE_FALLBACK_TARGET_HEIGHT,
+    TYPE_FALLBACK_TARGET_WIDTH,
+    VIEWPORT_HEIGHT,
+    VIEWPORT_WIDTH,
+)
 from app.protocol.enums import (
     ActionType,
     AgentKind,
@@ -23,30 +28,29 @@ EmitBrowserContext = Callable[[dict[str, Any]], Awaitable[None]]
 GateCheck = Callable[[], Awaitable[None]]
 
 PRE_ACTION_DELAY_SECONDS: dict[ActionType, float] = {
-    ActionType.NAVIGATE: 0.8,
-    ActionType.CLICK: 0.8,
-    ActionType.TYPE: 0.6,
-    ActionType.SCROLL: 0.4,
-    ActionType.READ: 0.14,
-    ActionType.SPAWN_SUBAGENT: 0.12,
-    ActionType.SUBAGENT_RESULT: 0.12,
+    ActionType.NAVIGATE: 0.3,
+    ActionType.CLICK: 0.3,
+    ActionType.TYPE: 0.2,
+    ActionType.SCROLL: 0.15,
+    ActionType.READ: 0.05,
+    ActionType.SPAWN_SUBAGENT: 0.05,
+    ActionType.SUBAGENT_RESULT: 0.05,
 }
 
 POST_ACTION_DELAY_SECONDS: dict[ActionType, float] = {
-    ActionType.NAVIGATE: 1.2,
-    ActionType.CLICK: 0.5,
-    ActionType.TYPE: 0.5,
-    ActionType.SCROLL: 0.4,
-    ActionType.READ: 0.42,
-    ActionType.SPAWN_SUBAGENT: 0.2,
-    ActionType.SUBAGENT_RESULT: 0.26,
+    ActionType.NAVIGATE: 0.5,
+    ActionType.CLICK: 0.2,
+    ActionType.TYPE: 0.2,
+    ActionType.SCROLL: 0.15,
+    ActionType.READ: 0.15,
+    ActionType.SPAWN_SUBAGENT: 0.08,
+    ActionType.SUBAGENT_RESULT: 0.1,
 }
 
 TARGET_RESOLUTION_TIMEOUT_SECONDS = 0.5
 TYPE_ACTION_TIMEOUT_SECONDS = 3.0
 VALUE_READ_TIMEOUT_SECONDS = 0.5
-TYPE_FALLBACK_TARGET_WIDTH = 220
-TYPE_FALLBACK_TARGET_HEIGHT = 40
+
 
 
 async def _noop_emit_browser_context(_payload: dict[str, Any]) -> None:

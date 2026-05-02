@@ -1413,7 +1413,6 @@ button:disabled {
 
 .sprite-main.is-moving.is-idle,
 .sprite-main.is-moving.is-busy,
-.sprite-main.is-moving.is-typing,
 .sprite-main.is-moving.is-clicking,
 .sprite-main.is-moving.is-success,
 .sprite-main.is-moving.is-error,
