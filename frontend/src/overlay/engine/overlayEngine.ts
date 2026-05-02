@@ -67,9 +67,9 @@ const TRANSIENT_ACTION_HOLD_MS: Partial<Record<AgentEventPayload["action_type"],
   complete: 820,
   error: 820,
 };
-const TYPE_FALLBACK_TARGET_WIDTH = 160;
-const TYPE_FALLBACK_TARGET_HEIGHT = 44;
-const TYPE_TARGET_RECT_TTL_MS = 1800;
+const TYPE_FALLBACK_TARGET_WIDTH = 220;
+const TYPE_FALLBACK_TARGET_HEIGHT = 40;
+const TYPE_TARGET_RECT_TTL_MS = 5000;
 const BASE_STAGE_WIDTH = 1920;
 const BASE_STAGE_HEIGHT = 1080;
 
@@ -326,10 +326,11 @@ export class OverlayEngine {
       };
     }
 
-    if (payload.state === "completed" || payload.state === "failed" || payload.state === "stopped") {
-      this.caption = terminalCaptionForState(payload.state);
-      this.captionVisibleUntilMs = Number.POSITIVE_INFINITY;
-    }
+  if (payload.state === "completed" || payload.state === "failed" || payload.state === "stopped") {
+    this.caption = terminalCaptionForState(payload.state);
+    this.captionVisibleUntilMs = Number.POSITIVE_INFINITY;
+    this.typing = false;
+  }
 
     const effectiveSessionState = this._effectiveSessionState();
     this.player.syncToRuntime({ sessionState: effectiveSessionState }, nowMs);
@@ -532,7 +533,7 @@ export class OverlayEngine {
     const hotspot = this._resolveHotspot(payload);
     this.targetPoint = hotspot;
     this.targetRect = this._resolvedTargetRect(payload, nowMs);
-    this.targetVisualVisibleUntilMs = hotspot || payload.target_rect ? nowMs + 950 : 0;
+    const baseTargetTtl = hotspot || payload.target_rect ? nowMs + 950 : 0;
     if (payload.agent_kind === "main") {
       const shouldReplaceVisualAction =
         !this.mainActionType ||
@@ -543,6 +544,12 @@ export class OverlayEngine {
         this.mainActionVisibleUntilMs = nowMs + (TRANSIENT_ACTION_HOLD_MS[payload.action_type] ?? 420);
       }
       this.typing = this.mainActionType === "type";
+      this.targetVisualVisibleUntilMs =
+        this.typing && this.targetRect
+          ? Math.max(baseTargetTtl, this.mainActionVisibleUntilMs)
+          : baseTargetTtl;
+    } else {
+      this.targetVisualVisibleUntilMs = baseTargetTtl;
     }
 
     const spriteTarget = this._spriteTargetFromHotspot(payload, hotspot);
@@ -629,15 +636,26 @@ export class OverlayEngine {
     if (payload.action_type !== "type") {
       return null;
     }
-    if (!payload.cursor) {
-      if (
-        this.lastTypingTargetRect &&
-        nowMs - this.lastTypingTargetRectAt <= TYPE_TARGET_RECT_TTL_MS
-      ) {
-        return this.lastTypingTargetRect;
-      }
-      return null;
+  if (!payload.cursor) {
+    if (
+      this.lastTypingTargetRect &&
+      nowMs - this.lastTypingTargetRectAt <= TYPE_TARGET_RECT_TTL_MS
+    ) {
+      return this.lastTypingTargetRect;
     }
+    if (this.mainAgent) {
+      const fallbackRect = {
+        x: Math.max(0, Math.min(BASE_STAGE_WIDTH - TYPE_FALLBACK_TARGET_WIDTH, Math.round(this.mainAgent.x - TYPE_FALLBACK_TARGET_WIDTH / 2))),
+        y: Math.max(0, Math.min(BASE_STAGE_HEIGHT - TYPE_FALLBACK_TARGET_HEIGHT, Math.round(this.mainAgent.y - TYPE_FALLBACK_TARGET_HEIGHT / 2))),
+        width: TYPE_FALLBACK_TARGET_WIDTH,
+        height: TYPE_FALLBACK_TARGET_HEIGHT,
+      };
+      this.lastTypingTargetRect = fallbackRect;
+      this.lastTypingTargetRectAt = nowMs;
+      return fallbackRect;
+    }
+    return null;
+  }
     const width = TYPE_FALLBACK_TARGET_WIDTH;
     const height = TYPE_FALLBACK_TARGET_HEIGHT;
     const x = Math.max(

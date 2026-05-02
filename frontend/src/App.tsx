@@ -391,10 +391,12 @@ export default function App() {
   const [takeoverModePreference, setTakeoverModePreference] =
     useState<TakeoverModePreference>(() => readStoredTakeoverModePreference());
   const [takeoverPending, setTakeoverPending] = useState(false);
+  const takeoverStartedAtRef = useRef<number>(0);
   const engineRef = useRef<OverlayEngine | null>(null);
   const socketRef = useRef<SessionSocket | null>(null);
   const webrtcRef = useRef<WebRTCClient | null>(null);
   const webrtcSessionRef = useRef<string | null>(null);
+  const prevInteractionModeRef = useRef<string | null>(null);
   const frameTimesRef = useRef<number[]>([]);
   const previewState = useMemo(() => buildPreviewState(window.location.search), []);
   const uiReadySessionRef = useRef<string | null>(null);
@@ -434,9 +436,19 @@ export default function App() {
   const [fallbackModeDebounced, setFallbackModeDebounced] = useState(false);
   const fallbackEntryTimeRef = useRef<number>(0);
   const fallbackTimeoutRef = useRef<number>(0);
+  const prevDirectTakeoverRef = useRef<boolean>(false);
 
   useEffect(() => {
     if (isReviewMode) {
+      return;
+    }
+    const justLeftDirectTakeover = prevDirectTakeoverRef.current && !isDirectTakeoverActive;
+    prevDirectTakeoverRef.current = isDirectTakeoverActive;
+    if (justLeftDirectTakeover && fallbackModeDebounced) {
+      if (fallbackTimeoutRef.current) {
+        window.clearTimeout(fallbackTimeoutRef.current);
+      }
+      setFallbackModeDebounced(false);
       return;
     }
     const showVideo =
@@ -667,6 +679,15 @@ export default function App() {
   }, [localInteractionModeOverride, previewState.interactionModeOverride, state.session?.interaction_mode]);
 
   useEffect(() => {
+    if (state.connectionState === "connected" && takeoverPending && state.session?.interaction_mode !== "takeover") {
+      const elapsed = Date.now() - takeoverStartedAtRef.current;
+      if (elapsed > 3000) {
+        setTakeoverPending(false);
+      }
+    }
+  }, [state.connectionState, takeoverPending, state.session?.interaction_mode]);
+
+  useEffect(() => {
     activeAdapterRunIdRef.current = state.adapterRunId || null;
   }, [state.adapterRunId]);
 
@@ -747,6 +768,7 @@ export default function App() {
       setLocalInteractionModeOverride("watch");
       setLocalActiveInterventionOverride(null);
       setTakeoverPending(true);
+      takeoverStartedAtRef.current = Date.now();
       dispatch({ type: "resolve_intervention_local", payload: { resolution: "taken_over" } });
     }
     if (message.type === "end_takeover") {
@@ -869,8 +891,13 @@ export default function App() {
         (stream) => setWebrtcStream(stream),
       );
     }
-    webrtcRef.current.setOfferRequestPayload(webrtcRequestPayload);
-    if (webrtcSessionRef.current === state.session.session_id) {
+  webrtcRef.current.setOfferRequestPayload(webrtcRequestPayload);
+  const wasDirectTakeover = prevInteractionModeRef.current === "takeover" && state.session?.interaction_mode !== "takeover";
+  if (wasDirectTakeover) {
+    webrtcSessionRef.current = null;
+  }
+  prevInteractionModeRef.current = state.session?.interaction_mode ?? null;
+  if (webrtcSessionRef.current === state.session.session_id) {
       return;
     }
     webrtcSessionRef.current = state.session.session_id;

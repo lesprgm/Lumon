@@ -460,18 +460,22 @@ class SessionRuntime:
     async def broadcast(self, message: dict[str, Any]) -> None:
         validated = validate_server_message(message)
         stale: list[WebSocket] = []
-        for websocket in list(self._connections):
-            if websocket.application_state != WebSocketState.CONNECTED:
-                stale.append(websocket)
-                continue
+        active: list[WebSocket] = []
+        for ws in list(self._connections):
+            if ws.application_state == WebSocketState.CONNECTED:
+                active.append(ws)
+            else:
+                stale.append(ws)
+
+        async def _send(ws: WebSocket) -> None:
             try:
-                await websocket.send_json(validated)
-            except RuntimeError:
-                stale.append(websocket)
+                await ws.send_json(validated)
             except Exception:
-                stale.append(websocket)
-        for websocket in stale:
-            self._connections.discard(websocket)
+                stale.append(ws)
+
+        await asyncio.gather(*[_send(ws) for ws in active], return_exceptions=True)
+        for ws in stale:
+            self._connections.discard(ws)
 
     async def emit_session_state(self, websocket: WebSocket | None = None) -> None:
         if self.adapter_run_id is not None:

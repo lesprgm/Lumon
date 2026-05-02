@@ -264,7 +264,7 @@ describe("OverlayEngine", () => {
       target_rect: null,
     });
 
-    expect(latestTargetRect).toEqual({ x: 920, y: 498, width: 160, height: 44 });
+    expect(latestTargetRect).toEqual({ x: 890, y: 500, width: 220, height: 40 });
   });
 
   it("reuses recent typing target rect briefly when cursor is missing", () => {
@@ -287,7 +287,7 @@ describe("OverlayEngine", () => {
       cursor: { x: 900, y: 420 },
       target_rect: null,
     });
-    expect(latestTargetRect).toEqual({ x: 820, y: 398, width: 160, height: 44 });
+    expect(latestTargetRect).toEqual({ x: 790, y: 400, width: 220, height: 40 });
 
     now += 600;
     engine.enqueueEvent({
@@ -297,17 +297,95 @@ describe("OverlayEngine", () => {
       cursor: null,
       target_rect: null,
     });
-    expect(latestTargetRect).toEqual({ x: 820, y: 398, width: 160, height: 44 });
+    expect(latestTargetRect).toEqual({ x: 790, y: 400, width: 220, height: 40 });
 
-    now += 2200;
+  now += 2200;
+  engine.enqueueEvent({
+    ...makeEvent(42),
+    action_type: "type",
+    state: "typing",
+    cursor: null,
+    target_rect: null,
+  });
+  expect(latestTargetRect).not.toBeNull();
+  expect(latestTargetRect!.width).toBe(220);
+  expect(latestTargetRect!.height).toBe(40);
+});
+
+  it("falls back to agent-position rect after the TTL window expires", () => {
+    let now = 1000;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+
+    const engine = new OverlayEngine();
+    let latestTargetRect: { x: number; y: number; width: number; height: number } | null = null;
+
+    engine.subscribe((snapshot) => {
+      latestTargetRect = snapshot.targetRect;
+    });
+
+    engine.setStageReady(true);
+    engine.applySessionState(makeSessionState("running"));
+
     engine.enqueueEvent({
-      ...makeEvent(42),
+      ...makeEvent(50),
+      action_type: "type",
+      state: "typing",
+      cursor: { x: 900, y: 420 },
+      target_rect: null,
+    });
+    const withinTTL = latestTargetRect!;
+    expect(withinTTL).toEqual({ x: 790, y: 400, width: 220, height: 40 });
+
+    now += 5100;
+    engine.enqueueEvent({
+      ...makeEvent(51),
       action_type: "type",
       state: "typing",
       cursor: null,
       target_rect: null,
     });
-    expect(latestTargetRect).toBeNull();
+    expect(latestTargetRect).not.toBeNull();
+    expect(latestTargetRect!.width).toBe(220);
+    expect(latestTargetRect!.height).toBe(40);
+    expect(latestTargetRect!.x).not.toBe(withinTTL.x);
+    expect(latestTargetRect!.y).not.toBe(withinTTL.y);
+  });
+
+  it("falls back to agent position when cursor and TTL cache are both gone with no prior agent", () => {
+    let now = 1000;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+
+    const engine = new OverlayEngine();
+    let latestTargetRect: { x: number; y: number; width: number; height: number } | null = null;
+
+    engine.subscribe((snapshot) => {
+      latestTargetRect = snapshot.targetRect;
+    });
+
+    engine.setStageReady(true);
+    engine.applySessionState(makeSessionState("running"));
+
+    engine.enqueueEvent({
+      ...makeEvent(60),
+      action_type: "type",
+      state: "typing",
+      cursor: { x: 500, y: 300 },
+      target_rect: null,
+    });
+    expect(latestTargetRect).not.toBeNull();
+
+    now += 5100;
+
+    engine.enqueueEvent({
+      ...makeEvent(61),
+      action_type: "type",
+      state: "typing",
+      cursor: null,
+      target_rect: null,
+    });
+    expect(latestTargetRect).not.toBeNull();
+    expect(latestTargetRect!.width).toBe(220);
+    expect(latestTargetRect!.height).toBe(40);
   });
 
   it("keeps only the newest buffered frame and event windows before stage readiness", () => {
