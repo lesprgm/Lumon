@@ -13,7 +13,6 @@ const TAKEOVER_THOUGHT_DELAY_MIN_MS = 900;
 const TAKEOVER_THOUGHT_DELAY_MAX_MS = 1400;
 const TAKEOVER_THOUGHT_DURATION_MS = 2400;
 const TAKEOVER_INITIAL_THOUGHT_DURATION_MS = 3600;
-const TAKEOVER_READING_MIDDLE_FRAME_HOLD_MS = 9000;
 const TAKEOVER_STOP_DWELL_MS = 9000;
 
 const TOP_BAR_REGIONS = {
@@ -73,29 +72,6 @@ function moveDurationMs(fromLane: number, toLane: number): number {
   return 10000;
 }
 
-export function readingMiddleFrameIndex(frameCount: number): number {
-  return Math.floor(frameCount / 2);
-}
-
-function shouldFreezeTakeoverReadingPose({
-  isTakeoverTopBarSprite,
-  movementPhase,
-  idleEmote,
-  frameCount,
-}: {
-  isTakeoverTopBarSprite: boolean;
-  movementPhase: MovementPhase;
-  idleEmote: TopBarEmote;
-  frameCount: number;
-}): boolean {
-  return (
-    isTakeoverTopBarSprite &&
-    movementPhase !== "moving" &&
-    idleEmote === "reading" &&
-    frameCount > 0
-  );
-}
-
 export function resolveTopBarDisplayedFrameIndex({
   isTakeoverTopBarSprite,
   movementPhase,
@@ -109,16 +85,9 @@ export function resolveTopBarDisplayedFrameIndex({
   frameCount: number;
   idleFrameIndex: number;
 }): number {
-  if (
-    shouldFreezeTakeoverReadingPose({
-      isTakeoverTopBarSprite,
-      movementPhase,
-      idleEmote,
-      frameCount,
-    })
-  ) {
-    return readingMiddleFrameIndex(frameCount);
-  }
+  void isTakeoverTopBarSprite;
+  void movementPhase;
+  void idleEmote;
 
   if (frameCount <= 0) {
     return 0;
@@ -128,11 +97,6 @@ export function resolveTopBarDisplayedFrameIndex({
 }
 
 export function resolveTopBarIdleFrameDelayMs({
-  isTakeoverTopBarSprite,
-  movementPhase,
-  idleEmote,
-  frameCount,
-  idleFrameIndex,
   baseFrameDurationMs,
 }: {
   isTakeoverTopBarSprite: boolean;
@@ -142,22 +106,7 @@ export function resolveTopBarIdleFrameDelayMs({
   idleFrameIndex: number;
   baseFrameDurationMs: number;
 }): number {
-  const shouldHoldTakeoverReadingFrame =
-    shouldFreezeTakeoverReadingPose({
-      isTakeoverTopBarSprite,
-      movementPhase,
-      idleEmote,
-      frameCount,
-    }) &&
-    resolveTopBarDisplayedFrameIndex({
-      isTakeoverTopBarSprite,
-      movementPhase,
-      idleEmote,
-      frameCount,
-      idleFrameIndex,
-    }) === readingMiddleFrameIndex(frameCount);
-
-  return shouldHoldTakeoverReadingFrame ? TAKEOVER_READING_MIDDLE_FRAME_HOLD_MS : baseFrameDurationMs;
+  return baseFrameDurationMs;
 }
 
 function pickWeightedRegion(weights: Record<TakeoverRegion, number>): TakeoverRegion {
@@ -388,17 +337,9 @@ export function StatusBar({
     frameCount: idleAnimation.frame_paths.length,
     idleFrameIndex,
   });
-  const idleFramePath = idleAnimation.frame_paths[displayedFrameIndex];
-  const isHeldTakeoverReadingPose =
-    displayedFrameIndex === readingMiddleFrameIndex(idleAnimation.frame_paths.length) &&
-    shouldFreezeTakeoverReadingPose({
-      isTakeoverTopBarSprite,
-      movementPhase,
-      idleEmote,
-      frameCount: idleAnimation.frame_paths.length,
-    });
+const idleFramePath = idleAnimation.frame_paths[displayedFrameIndex];
 
-  useEffect(() => {
+useEffect(() => {
     if (!showTopBarSprite) {
       setIdleFrameIndex(0);
       setHoverThought(null);
@@ -617,7 +558,7 @@ export function StatusBar({
             </div>
           ) : null}
           <img
-            className={`status-idle-sprite status-idle-sprite-${idleEmote}${isHeldTakeoverReadingPose ? " status-idle-sprite-is-held" : ""}`}
+            className={`status-idle-sprite status-idle-sprite-${idleEmote}`}
             style={spriteStyle}
             src={`${spriteSet.assetBasePath}/${idleFramePath}`}
             alt=""

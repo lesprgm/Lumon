@@ -8,7 +8,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LiveStage, resolveCaptionLayout, resolveMainSpriteStyle } from "./LiveStage";
 import {
   StatusBar,
-  readingMiddleFrameIndex,
   resolveTopBarDisplayedFrameIndex,
   resolveTopBarIdleFrameDelayMs,
 } from "./StatusBar";
@@ -173,8 +172,7 @@ describe("LiveStage takeover control", () => {
     vi.useRealTimers();
   });
 
-  it("holds the takeover reading animation on its middle frame for about nine seconds", () => {
-    expect(readingMiddleFrameIndex(8)).toBe(4);
+  it("cycles through reading frames normally during takeover perched phase", () => {
     expect(
       resolveTopBarDisplayedFrameIndex({
         isTakeoverTopBarSprite: true,
@@ -182,6 +180,15 @@ describe("LiveStage takeover control", () => {
         idleEmote: "reading",
         frameCount: 8,
         idleFrameIndex: 0,
+      }),
+    ).toBe(0);
+    expect(
+      resolveTopBarDisplayedFrameIndex({
+        isTakeoverTopBarSprite: true,
+        movementPhase: "perched",
+        idleEmote: "reading",
+        frameCount: 8,
+        idleFrameIndex: 4,
       }),
     ).toBe(4);
     expect(
@@ -193,30 +200,10 @@ describe("LiveStage takeover control", () => {
         idleFrameIndex: 4,
         baseFrameDurationMs: 340,
       }),
-    ).toBe(9000);
-    expect(
-      resolveTopBarIdleFrameDelayMs({
-        isTakeoverTopBarSprite: true,
-        movementPhase: "moving",
-        idleEmote: "reading",
-        frameCount: 8,
-        idleFrameIndex: 4,
-        baseFrameDurationMs: 340,
-      }),
-    ).toBe(340);
-    expect(
-      resolveTopBarIdleFrameDelayMs({
-        isTakeoverTopBarSprite: false,
-        movementPhase: "perched",
-        idleEmote: "reading",
-        frameCount: 8,
-        idleFrameIndex: 4,
-        baseFrameDurationMs: 340,
-      }),
     ).toBe(340);
   });
 
-  it("renders takeover reading on the held middle frame immediately", () => {
+  it("renders takeover reading on the initial frame and cycles normally", () => {
     const { container } = render(
       <StatusBar
         state={{
@@ -230,9 +217,9 @@ describe("LiveStage takeover control", () => {
     );
 
     const sprite = container.querySelector(".status-idle-sprite");
-    expect(sprite?.getAttribute("data-status-sprite-frame")).toBe("5");
-    expect(sprite?.getAttribute("src")).toContain("reading_06.png");
-    expect(sprite?.className).toContain("status-idle-sprite-is-held");
+    expect(sprite?.getAttribute("data-status-sprite-frame")).toBe("0");
+    expect(sprite?.getAttribute("src")).toContain("reading");
+    expect(sprite?.className).not.toContain("status-idle-sprite-is-held");
   });
 
   it("dispatches start_takeover from the top browser chrome when the header is present", () => {

@@ -255,10 +255,6 @@ button:disabled {
     status-idle-wobble 3.1s ease-in-out infinite;
 }
 
-.status-idle-sprite-reading.status-idle-sprite-is-held {
-  animation: status-idle-pop 420ms cubic-bezier(0.2, 1, 0.2, 1);
-}
-
 .status-thought-bubble {
   position: absolute;
   bottom: 26px;
