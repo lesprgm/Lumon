@@ -24,27 +24,18 @@ backend/.mypy_cache/
 /frontend/vite.config.d.ts
 /output/**
 /.opencode/logs/
-/scripts/*.log
-/scripts/*.out
-/scripts/*.err
-/scripts/*.pid
+/scripts/
 /logs/
 /.xdg-cache/
 /.xdg-data/
 /Screenshot *.png
 /Screen Recording *.mov
-/dog sprite/**/seedream_*.json
 /reading/
 /frontend/public/assets/lobster/**/generated_*/
 /frontend/public/assets/lobster/**/regen_candidates/
 /frontend/public/assets/lobster/**/cleaned_gemini31/
 /frontend/public/assets/lobster/**/backup_*/
 /frontend/public/assets/lobster/**/contact_sheet*.png
-/frontend/public/assets/dog/**/generated_*/
-/frontend/public/assets/dog/**/regen_candidates/
-/frontend/public/assets/dog/**/cleaned_gemini31/
-/frontend/public/assets/dog/**/backup_*/
-/frontend/public/assets/dog/**/contact_sheet*.png
 /patch.py
 /update_livestage_*.js
 /update_types.js
@@ -55,6 +46,7 @@ backend/.mypy_cache/
 /security_best_practices_report.md
 /DEMO_RUNBOOK.md
 /APP_OVERVIEW.md
+/docs/EDGE_CASES.md
 
 /.opencode/node_modules/
 /*.patch
@@ -62,23 +54,15 @@ backend/.mypy_cache/
 *.rej
 /test_monkeypatch.py
 /test_sdp*.py
-/scripts/patch_*.py
 /lumon-study/
 /notes/
 /backend/app/adapters/*.bak
-/scripts/harness_*.py
 /.netlify/
 /frontend/.netlify/
 /.wrangler/
 /frontend/dist-landing/
 /frontend/public/lumon.png
 /0322.mp4
-/frontend/public/landing/
-/frontend/src/landing/
-/frontend/src/RootApp.tsx
-/frontend/src/RootApp.test.tsx
-/frontend/scripts/
-/netlify.toml
 /tmp/
 /package.json
 /package-lock.json
@@ -99,13 +83,6 @@ backend/.mypy_cache/
 /frontend/coverage/
 /frontend/.vitest/
 
-# Non-runtime art workspace (large source assets)
-/dog sprite/
-/frontend/public/assets/dog/
-
 # Optional generated protocol fixture outputs (rebuild via backend/app/fixtures/build_fixtures.py)
 /backend/app/fixtures/messages/*.json
 /backend/app/fixtures/timelines/*.json
-
-# Large source sheet variants not used by runtime (normalized sheets are used)
-/frontend/public/assets/lobster/**/**_sheet_transparent.png
