@@ -28,8 +28,12 @@ import { SessionSocket } from "./lib/sessionSocket";
 import { LUMON_FRONTEND_FEATURES, LUMON_FRONTEND_RUNTIME_VERSION } from "./runtimeInfo";
 import { WebRTCClient, type WebRTCStatus } from "./lib/webrtcClient";
 import { OverlayEngine, type SceneSnapshot, resolveHotspotFromEvent, spriteTargetFromHotspot } from "./overlay/engine/overlayEngine";
-import { getSpriteSet, preloadSpriteFrames, SpritePlayer, type LumonActionType } from "./overlay/sprites";
-import type { SpriteFamily } from "./overlay/sprites";
+import {
+  LOBSTER_ASSET_BASE_PATH,
+  lobsterRuntimeManifest,
+  SpritePlayer,
+  type LumonActionType,
+} from "./overlay/sprites";
 import type {
   ActionType,
   AgentEventPayload,
@@ -95,10 +99,6 @@ function buildReviewRunUrl(
   const reviewParams = new URLSearchParams({ review_session: sessionId });
   const suffix = locationLike.hash || "";
   return `${locationLike.pathname}?${reviewParams.toString()}${suffix}`;
-}
-
-function resolveLobsterOnlySpriteFamily() {
-  return "lobster" as const;
 }
 
 function buildLiveRunUrl(locationLike: Pick<Location, "pathname" | "hash"> = window.location): string {
@@ -300,10 +300,8 @@ function buildReviewSnapshot(
   selectedEvent: AgentEventPayload | null,
   selectedIntervention: SessionArtifactResponse["artifact"]["interventions"][number] | null,
   backendOrigin: string,
-  spriteFamily: SpriteFamily,
 ): SceneSnapshot {
-  const spriteSet = getSpriteSet(spriteFamily);
-  const spritePlayer = new SpritePlayer(spriteSet.manifest, spriteSet.assetBasePath);
+  const spritePlayer = new SpritePlayer(lobsterRuntimeManifest, LOBSTER_ASSET_BASE_PATH);
   const activeAgentEvent = selectedEvent;
   const isTerminalReviewState = ["completed", "failed", "stopped"].includes(response.artifact.status);
   const terminalCaption =
@@ -352,14 +350,12 @@ function buildReviewSnapshot(
     targetPoint: hotspot,
     targetRect: activeAgentEvent?.target_rect ?? null,
     typing: activeAgentEvent?.action_type === "type",
-    fallbackMode: false,
   };
 }
 
 export default function App() {
   const [state, dispatch] = useReducer(sessionStoreReducer, initialSessionStoreState);
   const [leftRailCollapsed, setLeftRailCollapsed] = useState(true);
-  const [spriteFamily] = useState(() => resolveLobsterOnlySpriteFamily());
   const [isNavigating, setIsNavigating] = useState(false);
   const [snapshot, setSnapshot] = useState<SceneSnapshot>({
     frameSrc: null,
@@ -373,7 +369,6 @@ export default function App() {
     targetPoint: null,
     targetRect: null,
     typing: false,
-    fallbackMode: false,
   });
   const [reviewData, setReviewData] = useState<SessionArtifactResponse | null>(null);
   const [reviewSelection, setReviewSelection] = useState<ReviewSelectionKey>(null);
@@ -413,92 +408,13 @@ export default function App() {
   );
   const backendOrigin = useMemo(() => getBackendOrigin(), []);
   const isReviewMode = Boolean(reviewSessionId);
-  const isDirectTakeoverActive =
-    state.session?.interaction_mode === "takeover" &&
-    (state.session?.takeover_mode === "direct" ||
-      (state.session?.takeover_mode == null &&
-        state.session?.capabilities?.supports_direct_takeover === true));
-  const spriteSet = useMemo(() => getSpriteSet(spriteFamily), [spriteFamily]);
-
   if (!engineRef.current) {
-    engineRef.current = new OverlayEngine(spriteSet);
+    engineRef.current = new OverlayEngine();
   }
-
-  useEffect(() => {
-    preloadSpriteFrames(spriteSet.manifest, spriteSet.assetBasePath).catch(() => undefined);
-    engineRef.current?.setSpriteSet(spriteSet);
-  }, [spriteFamily, spriteSet]);
 
   useEffect(() => {
     writeStoredTakeoverModePreference(takeoverModePreference);
   }, [takeoverModePreference]);
-
-  const [fallbackModeDebounced, setFallbackModeDebounced] = useState(false);
-  const fallbackEntryTimeRef = useRef<number>(0);
-  const fallbackTimeoutRef = useRef<number>(0);
-  const prevDirectTakeoverRef = useRef<boolean>(false);
-
-  useEffect(() => {
-    if (isReviewMode) {
-      return;
-    }
-    const justLeftDirectTakeover = prevDirectTakeoverRef.current && !isDirectTakeoverActive;
-    prevDirectTakeoverRef.current = isDirectTakeoverActive;
-    if (justLeftDirectTakeover && fallbackModeDebounced) {
-      if (fallbackTimeoutRef.current) {
-        window.clearTimeout(fallbackTimeoutRef.current);
-      }
-      setFallbackModeDebounced(false);
-      return;
-    }
-    const showVideo =
-      Boolean(webrtcStream) &&
-      webrtcStatus !== "failed" &&
-      webrtcStatus !== "disconnected" &&
-      webrtcStatus !== "closed" &&
-      !isDirectTakeoverActive;
-    const hasVisibleBrowserTarget =
-      Boolean(state.browserContext?.url) &&
-      state.browserContext?.url !== "about:blank" &&
-      state.browserContext?.domain !== "unknown";
-    
-    const supportsFrames = state.session?.capabilities?.supports_frames ?? Boolean(snapshot.frameSrc);
-    
-    const isFallbackRaw = !showVideo && !snapshot.frameSrc && supportsFrames && hasVisibleBrowserTarget;
-
-    if (fallbackTimeoutRef.current) {
-      window.clearTimeout(fallbackTimeoutRef.current);
-    }
-
-    if (isFallbackRaw && !fallbackModeDebounced) {
-      // Entering fallback mode: debounce by 400ms to avoid flicker on brief drops
-      fallbackTimeoutRef.current = window.setTimeout(() => {
-        fallbackEntryTimeRef.current = Date.now();
-        setFallbackModeDebounced(true);
-      }, 400);
-    } else if (!isFallbackRaw && fallbackModeDebounced) {
-      // Exiting fallback mode: ensure we stay in it for at least 1500ms for stability
-      const timeInFallback = Date.now() - fallbackEntryTimeRef.current;
-      const remainingHoldTime = Math.max(0, 1500 - timeInFallback);
-      
-      fallbackTimeoutRef.current = window.setTimeout(() => {
-        setFallbackModeDebounced(false);
-      }, remainingHoldTime);
-    }
-  }, [
-    fallbackModeDebounced,
-    isDirectTakeoverActive,
-    isReviewMode,
-    snapshot.frameSrc,
-    state.browserContext,
-    state.session?.capabilities?.supports_frames,
-    webrtcStatus,
-    webrtcStream,
-  ]);
-
-  useEffect(() => {
-    engineRef.current?.setFallbackMode(fallbackModeDebounced);
-  }, [fallbackModeDebounced]);
 
   useEffect(() => {
     if (state.browserContext?.domain) {
@@ -988,9 +904,8 @@ export default function App() {
       reviewSelectionDetails.linkedEvent,
       reviewSelectionDetails.linkedIntervention,
       backendOrigin,
-      spriteFamily,
     );
-  }, [backendOrigin, isReviewMode, reviewData, reviewSelectionDetails, snapshot, spriteFamily]);
+  }, [backendOrigin, isReviewMode, reviewData, reviewSelectionDetails, snapshot]);
 
   const sessionLikeState: SessionStoreState = useMemo(() => {
     if (!isReviewMode || !reviewData) {

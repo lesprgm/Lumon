@@ -8,11 +8,7 @@ import type {
   InteractionMode,
   UiTelemetryPayload,
 } from "../protocol/types";
-import { readStoredSpriteFamily } from "../lib/spriteSelection";
 import type { SceneSnapshot } from "../overlay/engine/overlayEngine";
-import { getSpriteSet, SpritePlayer } from "../overlay/sprites";
-import type { LumonSessionState, SpriteRuntimeInput } from "../overlay/sprites";
-import { resolveSpriteAssetPath } from "../overlay/sprites/spriteLoader";
 import { scaleRect, scaleX, scaleY, unscaleX, unscaleY } from "./stageMath";
 import type { ActiveIntervention } from "../store/sessionStore";
 
@@ -87,54 +83,6 @@ function browserContextLabel(environmentType: BrowserContextPayload["environment
   }
 }
 
-function toBootstrapActionType(
-  actionType: AgentEventPayload["action_type"] | null,
-): SpriteRuntimeInput["actionType"] {
-  if (actionType === "spawn_subagent") {
-    return "wait";
-  }
-  if (actionType === "subagent_result") {
-    return "complete";
-  }
-  return actionType ?? undefined;
-}
-
-function resolveBootstrapRuntimeInput(snapshot: SceneSnapshot): SpriteRuntimeInput {
-  const sessionState: LumonSessionState =
-    snapshot.sessionState === "completed" ||
-    snapshot.sessionState === "failed" ||
-    snapshot.sessionState === "stopped" ||
-    snapshot.sessionState === "takeover" ||
-    snapshot.sessionState === "paused" ||
-    snapshot.sessionState === "pause_requested" ||
-    snapshot.sessionState === "waiting_for_approval" ||
-    snapshot.sessionState === "starting" ||
-    snapshot.sessionState === "idle"
-      ? snapshot.sessionState
-      : "running";
-  return {
-    sessionState,
-    actionType: toBootstrapActionType(snapshot.mainActionType),
-    isMoving: false,
-  };
-}
-
-function resolveBootstrapSpriteFramePath(player: SpritePlayer, snapshot: SceneSnapshot, nowMs: number): string {
-  return player.update(nowMs, resolveBootstrapRuntimeInput(snapshot)).framePath;
-}
-
-function buildBootstrapMainAgent(snapshot: SceneSnapshot, framePath: string): SceneSnapshot["mainAgent"] {
-  return {
-    id: "main_bootstrap",
-    x: 960,
-    y: 540,
-    framePath,
-    kind: "main",
-    summaryText: snapshot.caption || "Watching the page",
-    movementState: "anchored",
-  };
-}
-
 export function resolveMainSpriteStyle(
   snapshot: Pick<SceneSnapshot, "mainAgent" | "targetRect" | "typing">,
   stageDimensions: StageDimensions,
@@ -155,7 +103,9 @@ export function resolveMainSpriteStyle(
 }
 
 export function resolveCaptionLayout(
-  snapshot: Pick<SceneSnapshot, "fallbackMode" | "mainAgent"> & { targetPoint?: SceneSnapshot["targetPoint"] },
+  snapshot: Pick<SceneSnapshot, "mainAgent" | "sessionState"> & {
+    targetPoint?: SceneSnapshot["targetPoint"];
+  },
   stageDimensions: StageDimensions,
   mainStyle: { left: number; top: number } | null,
 ): {
@@ -164,6 +114,22 @@ export function resolveCaptionLayout(
   tailStyle: React.CSSProperties;
 } | null {
   if (!snapshot.mainAgent || !mainStyle) {
+    const isTerminal = ["completed", "failed", "stopped"].includes(
+      snapshot.sessionState,
+    );
+    if (isTerminal) {
+      const width = Math.min(stageDimensions.width * 0.4, 400);
+      return {
+        bubbleStyle: {
+          left: `${snapSpritePosition((stageDimensions.width - width) / 2)}px`,
+          top: `${snapSpritePosition(stageDimensions.height * 0.72)}px`,
+          width: `${width}px`,
+          textAlign: "center",
+        },
+        bubbleClassName: "caption-anchor caption-anchor-terminal",
+        tailStyle: { display: "none" },
+      };
+    }
     return null;
   }
 
@@ -173,22 +139,6 @@ export function resolveCaptionLayout(
   const anchorY = snapshot.targetPoint
     ? scaleY(snapshot.targetPoint.y, stageDimensions.height)
     : scaleY(snapshot.mainAgent.y, stageDimensions.height);
-
-  if (snapshot.fallbackMode) {
-    const bubbleWidth = Math.min(stageDimensions.width * 0.4, 400);
-    const bubbleLeft = stageDimensions.width / 2 - bubbleWidth / 2;
-    const bubbleTop = stageDimensions.height / 2 + 80;
-    return {
-      bubbleStyle: {
-        left: `${snapSpritePosition(bubbleLeft)}px`,
-        top: `${snapSpritePosition(bubbleTop)}px`,
-        width: `${bubbleWidth}px`,
-        textAlign: "center",
-      },
-      bubbleClassName: "caption-anchor is-hero-fallback-caption",
-      tailStyle: { display: "none" },
-    };
-  }
 
   const placeRight = anchorX < stageDimensions.width * 0.62;
   const bubbleWidth = Math.min(stageDimensions.width * 0.3, 288);
@@ -307,56 +257,6 @@ export function LiveStage({
     Boolean(browserContext?.url) &&
     browserContext?.url !== "about:blank" &&
     browserContext?.domain !== "unknown";
-  const bootstrapSpriteSet = useMemo(() => getSpriteSet(readStoredSpriteFamily()), []);
-  const bootstrapPlayer = useMemo(
-    () => new SpritePlayer(bootstrapSpriteSet.manifest, bootstrapSpriteSet.assetBasePath),
-    [bootstrapSpriteSet.assetBasePath, bootstrapSpriteSet.manifest],
-  );
-  const [bootstrapFramePath, setBootstrapFramePath] = useState(() =>
-    resolveBootstrapSpriteFramePath(bootstrapPlayer, snapshot, performance.now()),
-  );
-  const bootstrapRuntimeInput = useMemo(() => resolveBootstrapRuntimeInput(snapshot), [snapshot]);
-
-  useEffect(() => {
-    bootstrapPlayer.syncToRuntime(bootstrapRuntimeInput, performance.now());
-  }, [bootstrapPlayer, bootstrapRuntimeInput]);
-
-  const bootstrapMainAgent = useMemo(() => {
-    if (snapshot.mainAgent || !showStageSprites || !hasVisibleBrowserTarget) {
-      return null;
-    }
-    if (!snapshot.frameSrc && !showVideo) {
-      return null;
-    }
-    return buildBootstrapMainAgent(snapshot, bootstrapFramePath);
-  }, [bootstrapFramePath, hasVisibleBrowserTarget, showStageSprites, showVideo, snapshot]);
-
-  useEffect(() => {
-    if (!bootstrapMainAgent) {
-      return;
-    }
-
-    let rafId = 0;
-
-    const animateBootstrap = () => {
-      const nextFramePath = resolveBootstrapSpriteFramePath(bootstrapPlayer, snapshot, performance.now());
-      setBootstrapFramePath((current) => (current === nextFramePath ? current : nextFramePath));
-      rafId = window.requestAnimationFrame(animateBootstrap);
-    };
-
-    animateBootstrap();
-
-    return () => {
-      if (rafId) {
-        window.cancelAnimationFrame(rafId);
-      }
-    };
-  }, [bootstrapMainAgent, bootstrapPlayer, snapshot]);
-
-  const stageSnapshot = useMemo(
-    () => (bootstrapMainAgent ? { ...snapshot, mainAgent: bootstrapMainAgent } : snapshot),
-    [bootstrapMainAgent, snapshot],
-  );
 
   useLayoutEffect(() => {
     const stage = stageRef.current;
@@ -467,7 +367,7 @@ export function LiveStage({
         spriteTelemetrySentRef.current ||
         !onUiTelemetry ||
         !showStageSprites ||
-        !stageSnapshot.mainAgent
+        !snapshot.mainAgent
       ) {
         return;
       }
@@ -475,54 +375,54 @@ export function LiveStage({
       onUiTelemetry({
         event: "sprite_visible",
         meta: {
-          source_mode: stageSnapshot.mainAgent.id === "main_bootstrap" ? "bootstrap" : "event_driven",
+          source_mode: "event_driven",
         },
       });
     },
-    [onUiTelemetry, showStageSprites, stageSnapshot.mainAgent],
+    [onUiTelemetry, showStageSprites, snapshot.mainAgent],
   );
 
   useEffect(() => {
     const image = mainSpriteRef.current;
-    if (!image || !stageSnapshot.mainAgent || !showStageSprites) {
+    if (!image || !snapshot.mainAgent || !showStageSprites) {
       return;
     }
     if (image.complete && image.naturalWidth > 0) {
       emitSpriteVisible();
     }
-  }, [emitSpriteVisible, showStageSprites, stageSnapshot.mainAgent]);
+  }, [emitSpriteVisible, showStageSprites, snapshot.mainAgent]);
 
 
   const mainStyle = useMemo(() => {
-    if (!stageSnapshot.mainAgent || !stageDimensions) {
+    if (!snapshot.mainAgent || !stageDimensions) {
       return null;
     }
-    return resolveMainSpriteStyle(stageSnapshot, stageDimensions);
-  }, [stageSnapshot, stageDimensions]);
+    return resolveMainSpriteStyle(snapshot, stageDimensions);
+  }, [snapshot, stageDimensions]);
 
   useEffect(() => {
-    if (motionClassForSnapshot(stageSnapshot) !== "is-idle") {
+    if (motionClassForSnapshot(snapshot) !== "is-idle") {
       setHoverCelebration(false);
     }
-  }, [stageSnapshot]);
+  }, [snapshot]);
 
   const mainMotionClass = useMemo(() => {
-    if (hoverCelebration && motionClassForSnapshot(stageSnapshot) === "is-idle") {
+    if (hoverCelebration && motionClassForSnapshot(snapshot) === "is-idle") {
       return "is-hover-success";
     }
-    return motionClassForSnapshot(stageSnapshot);
-  }, [hoverCelebration, stageSnapshot]);
+    return motionClassForSnapshot(snapshot);
+  }, [hoverCelebration, snapshot]);
 
   const mainSpriteClasses = useMemo(() => {
-    const classes = ["sprite", "sprite-main", mainMotionClass, `movement-${stageSnapshot.mainAgent?.movementState ?? "anchored"}`];
-    if (stageSnapshot.mainAgent?.isMoving) {
+    const classes = ["sprite", "sprite-main", mainMotionClass, `movement-${snapshot.mainAgent?.movementState ?? "anchored"}`];
+    if (snapshot.mainAgent?.isMoving) {
       classes.push("is-moving");
     }
-    if (stageSnapshot.mainAgent?.arrivalPulse) {
+    if (snapshot.mainAgent?.arrivalPulse) {
       classes.push("is-arriving");
     }
     return classes.join(" ");
-  }, [mainMotionClass, stageSnapshot.mainAgent?.arrivalPulse, stageSnapshot.mainAgent?.isMoving, stageSnapshot.mainAgent?.movementState]);
+  }, [mainMotionClass, snapshot.mainAgent?.arrivalPulse, snapshot.mainAgent?.isMoving, snapshot.mainAgent?.movementState]);
 
   const showCaption =
     Boolean(snapshot.caption) &&
@@ -544,11 +444,11 @@ export function LiveStage({
     if (interventionState !== "approval" && interventionState !== "bridge") {
       return null;
     }
-    if (!stageSnapshot.mainAgent || !stageDimensions) {
+    if (!snapshot.mainAgent || !stageDimensions) {
       return null;
     }
-    const sourceX = scaleX(stageSnapshot.mainAgent.x, stageDimensions.width);
-    const sourceY = scaleY(stageSnapshot.mainAgent.y, stageDimensions.height);
+    const sourceX = scaleX(snapshot.mainAgent.x, stageDimensions.width);
+    const sourceY = scaleY(snapshot.mainAgent.y, stageDimensions.height);
     const targetX = stageDimensions.width / 2;
     const targetY = stageDimensions.height - 138;
     const dx = targetX - sourceX;
@@ -559,27 +459,27 @@ export function LiveStage({
       width: `${length}px`,
       transform: `translate3d(${snapSpritePosition(sourceX)}px, ${snapSpritePosition(sourceY)}px, 0) rotate(${angle}deg)`,
     };
-  }, [interventionState, stageSnapshot.mainAgent, stageDimensions]);
+  }, [interventionState, snapshot.mainAgent, stageDimensions]);
 
   const interventionOriginStyle = useMemo(() => {
     if (interventionState !== "approval" && interventionState !== "bridge") {
       return null;
     }
-    if (!stageSnapshot.mainAgent || !stageDimensions) {
+    if (!snapshot.mainAgent || !stageDimensions) {
       return null;
     }
     return {
-      left: `${snapSpritePosition(scaleX(stageSnapshot.mainAgent.x, stageDimensions.width))}px`,
-      top: `${snapSpritePosition(scaleY(stageSnapshot.mainAgent.y, stageDimensions.height))}px`,
+      left: `${snapSpritePosition(scaleX(snapshot.mainAgent.x, stageDimensions.width))}px`,
+      top: `${snapSpritePosition(scaleY(snapshot.mainAgent.y, stageDimensions.height))}px`,
     };
-  }, [interventionState, stageSnapshot.mainAgent, stageDimensions]);
+  }, [interventionState, snapshot.mainAgent, stageDimensions]);
 
   const captionAnchor = useMemo(() => {
     if (!showCaption || !stageDimensions) {
       return null;
     }
-    return resolveCaptionLayout(stageSnapshot, stageDimensions, mainStyle);
-  }, [showCaption, stageSnapshot, stageDimensions, mainStyle]);
+    return resolveCaptionLayout(snapshot, stageDimensions, mainStyle);
+  }, [showCaption, snapshot, stageDimensions, mainStyle]);
 
   const captionToneClass = useMemo(() => {
     switch (cueToneForAction(snapshot.mainActionType)) {
@@ -798,14 +698,14 @@ export function LiveStage({
             }}
           />
         ) : (
-          <div className={`browser-feed placeholder ${supportsFrames ? "" : "adapter-shell"} ${snapshot.fallbackMode ? "is-fallback" : ""}`}>
+          <div className={`browser-feed placeholder ${supportsFrames ? "" : "adapter-shell"}`}>
             {remoteTakeoverRestoringFeed ? (
               <div className="stage-restoring-feed" role="status" aria-live="polite">
                 <span className="stage-restoring-dot" aria-hidden="true" />
                 Restoring live feed...
               </div>
             ) : null}
-            {supportsFrames && hasVisibleBrowserTarget && !snapshot.fallbackMode ? (
+            {supportsFrames && hasVisibleBrowserTarget ? (
               <div className="stage-placeholder-shell">
                 <div className="stage-placeholder-loader"></div>
                 <div className="stage-placeholder-copy">
@@ -878,14 +778,14 @@ export function LiveStage({
         {displayFps !== null ? (
           <div className="stage-fps">{`fps ${displayFps.toFixed(1)} (${fpsSource})`}</div>
         ) : null}
-        {showStageSprites && stageSnapshot.mainAgent && mainStyle ? (
+        {showStageSprites && snapshot.mainAgent && mainStyle ? (
           <div
-            className={`sprite-positioner sprite-positioner-main ${stageSnapshot.fallbackMode ? "is-hero-fallback" : ""}`}
+            className="sprite-positioner sprite-positioner-main"
             style={{
               transform: `translate3d(${mainStyle.left}px, ${mainStyle.top}px, 0)`,
             }}
           >
-            {stageSnapshot.typing && (
+            {snapshot.typing && (
               <div className="typing-bubble" aria-hidden="true">
                 <span className="typing-label">typing</span>
                 <div className="typing-track">
@@ -898,11 +798,11 @@ export function LiveStage({
             <img
               ref={mainSpriteRef}
               className={mainSpriteClasses}
-              src={stageSnapshot.mainAgent.framePath}
+              src={snapshot.mainAgent.framePath}
               alt="Main sprite"
               onLoad={emitSpriteVisible}
               onMouseEnter={() => {
-                if (motionClassForSnapshot(stageSnapshot) === "is-idle") {
+                if (motionClassForSnapshot(snapshot) === "is-idle") {
                   setHoverCelebration(true);
                 }
               }}
@@ -911,8 +811,8 @@ export function LiveStage({
           </div>
         ) : null}
         {showStageSprites
-          ? stageSnapshot.subagents
-              .filter((agent) => agent.id !== stageSnapshot.mainAgent?.id)
+          ? snapshot.subagents
+              .filter((agent) => agent.id !== snapshot.mainAgent?.id)
               .map((agent) => (
               <div
                 key={agent.id}
