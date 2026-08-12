@@ -6,12 +6,7 @@ import urllib.parse
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from app.config import (
-    TYPE_FALLBACK_TARGET_HEIGHT,
-    TYPE_FALLBACK_TARGET_WIDTH,
-    VIEWPORT_HEIGHT,
-    VIEWPORT_WIDTH,
-)
+from app.config import VIEWPORT_HEIGHT, VIEWPORT_WIDTH
 from app.protocol.enums import (
     ActionType,
     AgentKind,
@@ -164,12 +159,6 @@ class BrowserActionLayer:
         await self.gate_check()
         locator = self.page.locator(selector).first
         cursor, target_rect, meta = await self._target_for_selector(selector)
-        if target_rect is None:
-            target_rect = self._fallback_target_rect_for_type(cursor)
-            meta = {
-                **meta,
-                "inferred_target_rect": True,
-            }
         await self._emit_event(
             agent_id="main_001",
             agent_kind=AgentKind.MAIN,
@@ -202,18 +191,6 @@ class BrowserActionLayer:
                 )
         return {"value_after": value_after}
 
-    def _fallback_target_rect_for_type(self, cursor: dict[str, int]) -> dict[str, int]:
-        width = TYPE_FALLBACK_TARGET_WIDTH
-        height = TYPE_FALLBACK_TARGET_HEIGHT
-        rect_x = max(0, min(VIEWPORT_WIDTH - width, cursor["x"] - width // 2))
-        rect_y = max(0, min(VIEWPORT_HEIGHT - height, cursor["y"] - height // 2))
-        return {
-            "x": rect_x,
-            "y": rect_y,
-            "width": width,
-            "height": height,
-        }
-
     async def scroll_by(
         self, delta_y: int, summary_text: str, intent: str
     ) -> dict[str, Any]:
@@ -234,7 +211,6 @@ class BrowserActionLayer:
                 "delta_y": delta_y,
                 "selector": None,
                 "wrapper_sequence": self._wrapper_sequence(),
-                "fallback_cursor": False,
             },
         )
         await self._pause_before_action(ActionType.SCROLL)
@@ -454,38 +430,25 @@ class BrowserActionLayer:
 
     async def _target_for_selector(
         self, selector: str
-    ) -> tuple[dict[str, int], dict[str, int] | None, dict[str, Any]]:
+    ) -> tuple[dict[str, int] | None, dict[str, int] | None, dict[str, Any]]:
         locator = self.page.locator(selector).first
-        target_resolution_error: str | None = None
-        try:
-            box = await asyncio.wait_for(
-                locator.bounding_box(), timeout=TARGET_RESOLUTION_TIMEOUT_SECONDS
-            )
-        except asyncio.TimeoutError:
-            box = None
-            target_resolution_error = "timeout"
-        except Exception as exc:
-            box = None
-            target_resolution_error = str(exc)
+        box = await asyncio.wait_for(
+            locator.bounding_box(), timeout=TARGET_RESOLUTION_TIMEOUT_SECONDS
+        )
         if box is None:
-            fallback = {"x": VIEWPORT_WIDTH // 2, "y": VIEWPORT_HEIGHT // 2}
-            meta = {
-                "selector": selector,
-                "wrapper_sequence": self._wrapper_sequence(),
-                "fallback_cursor": True,
-            }
-            if target_resolution_error is not None:
-                meta["target_resolution_error"] = target_resolution_error
             return (
-                fallback,
                 None,
-                meta,
+                None,
+                {
+                    "selector": selector,
+                    "wrapper_sequence": self._wrapper_sequence(),
+                },
             )
         rect = {
-            "x": max(0, min(VIEWPORT_WIDTH, int(round(box["x"])))),
-            "y": max(0, min(VIEWPORT_HEIGHT, int(round(box["y"])))),
-            "width": max(1, min(VIEWPORT_WIDTH, int(round(box["width"])))),
-            "height": max(1, min(VIEWPORT_HEIGHT, int(round(box["height"])))),
+            "x": max(0, min(VIEWPORT_WIDTH, round(box["x"]))),
+            "y": max(0, min(VIEWPORT_HEIGHT, round(box["y"]))),
+            "width": max(1, min(VIEWPORT_WIDTH, round(box["width"]))),
+            "height": max(1, min(VIEWPORT_HEIGHT, round(box["height"]))),
         }
         cursor = {
             "x": max(0, min(VIEWPORT_WIDTH, rect["x"] + rect["width"] // 2)),
@@ -497,7 +460,6 @@ class BrowserActionLayer:
             {
                 "selector": selector,
                 "wrapper_sequence": self._wrapper_sequence(),
-                "fallback_cursor": False,
             },
         )
 
@@ -573,13 +535,13 @@ class BrowserActionLayer:
             )
         return None
 
-    async def _scroll_position(self) -> int:
+    async def _scroll_position(self) -> int | None:
         if not hasattr(self.page, "evaluate"):
-            return 0
+            return None
         with contextlib.suppress(Exception):
             value = await self.page.evaluate("() => Math.round(window.scrollY || 0)")
             return int(value)
-        return 0
+        return None
 
     async def _pause_before_action(
         self, action_type: ActionType, selector: str | None = None
@@ -618,27 +580,23 @@ class BrowserActionLayer:
         frame_event = self._frame_sync()
         if frame_event is None:
             return
-        try:
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(frame_event.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
-            pass
 
     async def _type_value(self, locator: Any, value: str) -> None:
         if hasattr(locator, "press_sequentially"):
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    locator.fill(""), timeout=TYPE_ACTION_TIMEOUT_SECONDS
-                )
+            await asyncio.wait_for(
+                locator.fill(""), timeout=TYPE_ACTION_TIMEOUT_SECONDS
+            )
             await asyncio.wait_for(
                 locator.press_sequentially(value, delay=85),
                 timeout=TYPE_ACTION_TIMEOUT_SECONDS,
             )
             return
         if hasattr(locator, "type"):
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    locator.fill(""), timeout=TYPE_ACTION_TIMEOUT_SECONDS
-                )
+            await asyncio.wait_for(
+                locator.fill(""), timeout=TYPE_ACTION_TIMEOUT_SECONDS
+            )
             await asyncio.wait_for(
                 locator.type(value, delay=85), timeout=TYPE_ACTION_TIMEOUT_SECONDS
             )

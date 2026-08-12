@@ -7,19 +7,12 @@ import os
 import re
 import shutil
 import urllib.parse
-from collections.abc import Sequence
 from collections import deque
 from itertools import count
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from app.adapters.base import AdapterConnector
 from app.opencode_signals import classify_signal_detailed, task_mentions_browser
-from app.config import (
-    TYPE_FALLBACK_TARGET_HEIGHT,
-    TYPE_FALLBACK_TARGET_WIDTH,
-    VIEWPORT_HEIGHT,
-    VIEWPORT_WIDTH,
-)
 from app.protocol.enums import ErrorCode, SessionState
 from app.protocol.models import BrowserCommandRecord, BrowserCommandRequest
 from app.protocol.normalizer import normalize_external_event
@@ -38,7 +31,7 @@ class OpenCodeConnector(AdapterConnector):
     adapter_id = "opencode"
     takeover_mode = None
     takeover_url = None
-    base_capabilities = {
+    base_capabilities: ClassVar[dict[str, bool]] = {
         "supports_pause": False,
         "supports_approval": False,
         "supports_takeover": False,
@@ -46,7 +39,7 @@ class OpenCodeConnector(AdapterConnector):
         "supports_direct_takeover": False,
     }
 
-    def __init__(self, runtime: "SessionRuntimeProtocol") -> None:
+    def __init__(self, runtime: SessionRuntimeProtocol) -> None:
         self.runtime = runtime
         self.adapter_run_id = new_id("run")
         self.event_seq = count(1)
@@ -601,10 +594,12 @@ class OpenCodeConnector(AdapterConnector):
             web_bridge=bridge_id,
             demo_mode=demo_mode,
         )
-        self.bridge_runtime = _BridgeRuntimeProxy(self, bridge_id, bridge_task_text)
-        self.bridge_connector = create_connector(self.bridge_runtime, bridge_id)
-        self.takeover_mode = getattr(self.bridge_connector, "takeover_mode", None)
-        self.takeover_url = getattr(self.bridge_connector, "takeover_url", None)
+        bridge_runtime = _BridgeRuntimeProxy(self, bridge_id, bridge_task_text)
+        bridge_connector = create_connector(bridge_runtime, bridge_id)
+        self.bridge_runtime = bridge_runtime
+        self.bridge_connector = bridge_connector
+        self.takeover_mode = getattr(bridge_connector, "takeover_mode", None)
+        self.takeover_url = getattr(bridge_connector, "takeover_url", None)
         await self.runtime.emit_agent_event(
             self._normalize_opencode_event(
                 {
@@ -624,8 +619,10 @@ class OpenCodeConnector(AdapterConnector):
         await self.runtime.emit_session_state()
         self._bridge_start_task = asyncio.create_task(
             self._run_bridge_start(
+                bridge_connector,
                 bridge_task_text,
                 demo_mode=demo_mode,
+                web_mode=self.selected_web_mode,
                 bridge_context=bridge_context,
             )
         )
@@ -666,7 +663,7 @@ class OpenCodeConnector(AdapterConnector):
                     self.bridge_connector.command_ready.wait(),
                     timeout=COMMAND_DELEGATE_READY_TIMEOUT_SECONDS,
                 )  # type: ignore[attr-defined]
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 await self._stop_bridge()
                 raise RuntimeError(
                     "Lumon browser delegate did not become ready in time"
@@ -689,11 +686,8 @@ class OpenCodeConnector(AdapterConnector):
         self.takeover_mode = getattr(self.bridge_connector, "takeover_mode", None)
         self.takeover_url = getattr(self.bridge_connector, "takeover_url", None)
 
-        meta = result.get("meta")
-        if not isinstance(meta, dict):
-            meta = {}
-        else:
-            meta = dict(meta)
+        raw_meta = result.get("meta")
+        meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
 
         if self.takeover_mode in {"remote", "direct"}:
             meta.setdefault("takeover_mode", self.takeover_mode)
@@ -766,34 +760,46 @@ class OpenCodeConnector(AdapterConnector):
 
     async def _run_bridge_start(
         self,
+        bridge_connector: AdapterConnector,
         bridge_task_text: str,
         *,
         demo_mode: bool,
+        web_mode: WebModeId,
         bridge_context: dict[str, Any],
     ) -> None:
         try:
-            await self.bridge_connector.start_task(
+            await bridge_connector.start_task(
                 bridge_task_text,
                 demo_mode=demo_mode,
-                web_mode=self.selected_web_mode,
+                web_mode=web_mode,
                 bridge_context=bridge_context,
             )
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as exc:
+            stale = self.bridge_connector is not bridge_connector
             self._emit_runtime_decision(
                 reason_code="bridge_start_exception",
                 summary_text="Bridge start raised an exception",
                 severity="error",
                 error=str(exc),
+                stale=stale,
             )
-            await self._stop_bridge()
+            await self._stop_bridge(expected_connector=bridge_connector)
 
     async def _wait_for_bridge_completion(self) -> tuple[str, str] | None:
-        if self.bridge_completion is None:
+        bridge_completion = self.bridge_completion
+        if bridge_completion is None:
             return None
-        if not self.bridge_completion.is_set():
-            await self.bridge_completion.wait()
+        if not bridge_completion.is_set():
+            await bridge_completion.wait()
+        if self.bridge_completion is not bridge_completion:
+            self._emit_runtime_decision(
+                reason_code="stale_bridge_wait_ignored",
+                summary_text="Ignored completion from a replaced browser bridge",
+                severity="info",
+            )
+            return None
         result = self.bridge_result
         self.bridge_result = None
         self.bridge_completion = None
@@ -811,17 +817,28 @@ class OpenCodeConnector(AdapterConnector):
             and not self.bridge_completion.is_set()
         )
 
-    async def _on_bridge_complete(self, status: str, summary_text: str) -> None:
+    async def _on_bridge_complete(
+        self,
+        source_runtime: _BridgeRuntimeProxy,
+        status: str,
+        summary_text: str,
+    ) -> None:
+        if self.bridge_runtime is not source_runtime:
+            self._emit_runtime_decision(
+                reason_code="stale_bridge_completion_ignored",
+                summary_text="Ignored completion from a replaced browser bridge",
+                severity="info",
+                status=status,
+            )
+            return
         self.bridge_result = (status, summary_text)
         bridge_completion = self.bridge_completion
         if (
             self.bridge_connector is not None
             and getattr(self.bridge_connector, "takeover_mode", None) is not None
         ):
-            try:
+            with contextlib.suppress(Exception):
                 await self.bridge_connector.end_takeover()
-            except Exception:
-                pass
         self.bridge_connector = None
         self.bridge_runtime = None
         self.active_web_bridge = None
@@ -861,13 +878,31 @@ class OpenCodeConnector(AdapterConnector):
         if bridge_completion is not None and not bridge_completion.is_set():
             bridge_completion.set()
 
-    async def _stop_bridge(self) -> None:
+    async def _stop_bridge(
+        self, *, expected_connector: AdapterConnector | None = None
+    ) -> None:
+        if (
+            expected_connector is not None
+            and self.bridge_connector is not expected_connector
+        ):
+            return
         self.pending_bridge_offer = None
-        if self._bridge_start_task is not None and not self._bridge_start_task.done():
-            self._bridge_start_task.cancel()
-        self._bridge_start_task = None
-        if self.bridge_connector is not None:
-            await self.bridge_connector.stop()
+        bridge_connector = self.bridge_connector
+        bridge_start_task = self._bridge_start_task
+        current_task = asyncio.current_task()
+        if (
+            bridge_start_task is not None
+            and not bridge_start_task.done()
+            and bridge_start_task is not current_task
+        ):
+            bridge_start_task.cancel()
+            await asyncio.gather(bridge_start_task, return_exceptions=True)
+        if self._bridge_start_task is bridge_start_task:
+            self._bridge_start_task = None
+        if bridge_connector is not None:
+            await bridge_connector.stop()
+        if self.bridge_connector is not bridge_connector:
+            return
         if self.bridge_completion is not None and not self.bridge_completion.is_set():
             self.bridge_result = ("stopped", "OpenCode browser bridge stopped")
             self.bridge_completion.set()
@@ -966,18 +1001,6 @@ class OpenCodeConnector(AdapterConnector):
                 decision=decision, should_launch=True, reason_code="browser_signal"
             )
             return True
-        # Keep the task-text fallback only for synthetic/demo flows where no
-        # richer OpenCode event metadata exists yet.
-        if signal == "none" and raw.get("type") == "browser.search":
-            fallback = self._task_needs_web(task_text)
-            _emit_decision(
-                decision=decision,
-                should_launch=fallback,
-                reason_code="synthetic_task_fallback"
-                if fallback
-                else "synthetic_task_no_browser_need",
-            )
-            return fallback
         _emit_decision(
             decision=decision, should_launch=False, reason_code="no_browser_signal"
         )
@@ -1172,21 +1195,6 @@ class OpenCodeConnector(AdapterConnector):
 
         cursor = raw.get("cursor")
         target_rect = raw.get("target_rect")
-        if mapped_action_type in (
-            "type",
-            "click",
-        ) and cursor is None and target_rect is None:
-            cx = VIEWPORT_WIDTH // 2
-            cy = VIEWPORT_HEIGHT // 2
-            cursor = {"x": cx, "y": cy}
-            fw = TYPE_FALLBACK_TARGET_WIDTH
-            fh = TYPE_FALLBACK_TARGET_HEIGHT
-            target_rect = {
-                "x": max(0, min(VIEWPORT_WIDTH - fw, cx - fw // 2)),
-                "y": max(0, min(VIEWPORT_HEIGHT - fh, cy - fh // 2)),
-                "width": fw,
-                "height": fh,
-            }
 
         return normalize_external_event(
             {
@@ -1536,7 +1544,7 @@ class _BridgeRuntimeProxy:
         await self.parent.runtime.emit_session_state()
 
     async def complete_task(self, status: str, summary_text: str) -> None:
-        await self.parent._on_bridge_complete(status, summary_text)
+        await self.parent._on_bridge_complete(self, status, summary_text)
 
     async def capture_live_keyframe(self, reason: str) -> str | None:
         return await self.parent.runtime.capture_live_keyframe(reason)
