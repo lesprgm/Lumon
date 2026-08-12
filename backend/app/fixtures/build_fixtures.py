@@ -5,11 +5,9 @@ import json
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image
-
 from app.config import DEFAULT_ADAPTER_ID, VIEWPORT_HEIGHT, VIEWPORT_WIDTH
 from app.protocol.enums import ErrorCode
-from app.utils.ids import utc_timestamp
+from PIL import Image
 
 FIXTURE_ROOT = Path(__file__).resolve().parent
 MESSAGES_DIR = FIXTURE_ROOT / "messages"
@@ -73,7 +71,7 @@ def agent_event(
         "event_seq": event_seq,
         "event_id": event_id,
         "source_event_id": source_event_id,
-        "timestamp": utc_timestamp(),
+        "timestamp": f"2026-03-18T00:00:{event_seq:02d}Z",
         "session_id": "sess_demo_001",
         "adapter_id": adapter_id,
         "adapter_run_id": "run_demo_001",
@@ -117,7 +115,7 @@ def background_worker_update() -> dict:
         "agent_id": "worker_001",
         "summary_text": "Comparing hotel ratings in the background",
         "state": "running",
-        "timestamp": utc_timestamp(),
+        "timestamp": "2026-03-18T00:00:08Z",
     }
 
 

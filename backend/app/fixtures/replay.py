@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 from app.fixtures.build_fixtures import main as build_fixtures
 from app.protocol.validation import validate_server_message

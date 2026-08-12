@@ -13,10 +13,16 @@ dependencies = [
   "av>=12.0,<13.0",
 ]
 
+[project.scripts]
+lumon-cli = "app.cli.main:main"
+
 [project.optional-dependencies]
 dev = [
+  "httpx2>=2.9,<3.0",
+  "pillow>=11.0,<13.0",
   "pytest>=8.3,<9.0",
   "pytest-asyncio>=0.25,<1.0",
+  "ruff>=0.12,<1.0",
 ]
 
 [tool.pytest.ini_options]
