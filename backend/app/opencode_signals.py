@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from typing import Any, Literal
-
-OpenCodeSignal = Literal["browser", "intervention", "none"]
-SignalTier = Literal["A", "B", "C", "none"]
+from collections.abc import Mapping
+from typing import Any
 
 _BROWSER_TOKENS = (
     "browser",
@@ -34,24 +31,6 @@ _INTERVENTION_TOKENS = (
 )
 
 
-def _collect_text_fragments(value: Any, *, depth: int = 0) -> Iterable[str]:
-    if depth > 4 or value is None:
-        return
-    if isinstance(value, str):
-        yield value
-        return
-    if isinstance(value, bool | int | float):
-        yield str(value)
-        return
-    if isinstance(value, Mapping):
-        for item in value.values():
-            yield from _collect_text_fragments(item, depth=depth + 1)
-        return
-    if isinstance(value, list | tuple | set):
-        for item in value:
-            yield from _collect_text_fragments(item, depth=depth + 1)
-
-
 def task_mentions_browser(task_text: str) -> bool:
     lowered = task_text.lower()
     return any(token in lowered for token in _BROWSER_TOKENS)
@@ -67,8 +46,6 @@ def classify_signal_detailed(payload: Mapping[str, Any]) -> dict[str, Any]:
         or payload.get("name")
         or ""
     ).lower()
-    text = " ".join(_collect_text_fragments(payload)).lower()
-
     # Tier A: authoritative runtime signals
     if event_type in {"approval_required", "bridge_offer"}:
         return {"signal": "intervention", "tier": "A", "confidence": 1.0, "reason_code": "authoritative_intervention_event"}
@@ -97,23 +74,4 @@ def classify_signal_detailed(payload: Mapping[str, Any]) -> dict[str, Any]:
         if any(token in event_type for token in _BROWSER_TOKENS):
             return {"signal": "browser", "tier": "B", "confidence": 0.8, "reason_code": "typed_browser_token"}
 
-    # Tier C: text heuristics fallback (compatibility only)
-    if any(token in text for token in _INTERVENTION_TOKENS):
-        return {"signal": "intervention", "tier": "C", "confidence": 0.55, "reason_code": "text_intervention_token"}
-    if any(token in text for token in _BROWSER_TOKENS):
-        return {"signal": "browser", "tier": "C", "confidence": 0.55, "reason_code": "text_browser_token"}
-
     return {"signal": "none", "tier": "none", "confidence": 0.0, "reason_code": "no_signal"}
-
-
-def classify_signal(payload: Mapping[str, Any]) -> OpenCodeSignal:
-    return classify_signal_detailed(payload)["signal"]
-
-
-def should_open_ui(payload: Mapping[str, Any]) -> bool:
-    decision = classify_signal_detailed(payload)
-    signal = decision["signal"]
-    tier = decision["tier"]
-    if signal == "none":
-        return False
-    return tier in {"A", "B"}

@@ -13,17 +13,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-_ERROR_LOG_PATH = Path(
-    os.getenv("LUMON_ERROR_LOG", str(Path(__file__).resolve().parents[2] / "output" / "lumon_error.log"))
-)
-_ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-_logger = logging.getLogger("lumon.error")
-_handler = logging.FileHandler(str(_ERROR_LOG_PATH), encoding="utf-8")
-_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-_logger.addHandler(_handler)
-_logger.setLevel(logging.ERROR)
-
+from app.adapters.browser_pool import init_browser_pool, shutdown_browser_pool
 from app.config import (
     BACKEND_RUNTIME_FEATURES,
     FRONTEND_RUNTIME_FEATURES,
@@ -41,8 +31,18 @@ from app.protocol.models import (
     ResumeIntentRequest,
     UiTelemetryPayload,
 )
-from app.adapters.browser_pool import init_browser_pool, shutdown_browser_pool
 from app.session.manager import SessionManager
+
+_ERROR_LOG_PATH = Path(
+    os.getenv("LUMON_ERROR_LOG", str(Path(__file__).resolve().parents[2] / "output" / "lumon_error.log"))
+)
+_ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+_logger = logging.getLogger("lumon.error")
+_handler = logging.FileHandler(str(_ERROR_LOG_PATH), encoding="utf-8")
+_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+_logger.addHandler(_handler)
+_logger.setLevel(logging.ERROR)
 
 DEFAULT_ARTIFACT_EVENT_LIMIT = 1200
 DEFAULT_ARTIFACT_COMMAND_LIMIT = 400
@@ -50,10 +50,15 @@ MAX_ARTIFACT_LIMIT = 5000
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(app: FastAPI):
     await init_browser_pool()
-    yield
-    await shutdown_browser_pool()
+    try:
+        yield
+    finally:
+        try:
+            await app.state.session_manager.shutdown()
+        finally:
+            await shutdown_browser_pool()
 
 
 def create_app() -> FastAPI:
