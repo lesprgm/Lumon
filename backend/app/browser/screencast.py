@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import time
 import contextlib
+import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -13,7 +13,6 @@ from app.streaming.stream_profile import (
     StreamProfileConfig,
     default_stream_profile,
 )
-
 
 FrameEmitter = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -71,6 +70,7 @@ class CDPScreencastStreamer:
         self._preset_index = 0
         self._health_task: asyncio.Task[None] | None = None
         self._emit_task: asyncio.Task[None] | None = None
+        self._frame_tasks: set[asyncio.Task[None]] = set()
         self._emit_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
             maxsize=self.profile_config.cdp_emit_queue_size
         )
@@ -78,6 +78,7 @@ class CDPScreencastStreamer:
         self._fallback_requested = asyncio.Event()
         self._frame_emitted_event = asyncio.Event()
         self._min_fps = self.profile_config.cdp_min_fps
+        self._frame_handler = self._on_screencast_frame
 
     @property
     def presets(self) -> tuple[ScreencastPreset, ...]:
@@ -95,31 +96,50 @@ class CDPScreencastStreamer:
         if self._running:
             return
         self._running = True
-        self.cdp_session.on("Page.screencastFrame", self._on_screencast_frame)
-        await self.cdp_session.send("Page.enable")
-        await self._start_screencast()
-        self._emit_task = asyncio.create_task(self._emit_loop())
-        self._health_task = asyncio.create_task(self._monitor_health())
+        self.cdp_session.on("Page.screencastFrame", self._frame_handler)
+        try:
+            await self.cdp_session.send("Page.enable")
+            await self._start_screencast()
+            self._emit_task = asyncio.create_task(self._emit_loop())
+            self._health_task = asyncio.create_task(self._monitor_health())
+        except Exception:
+            await self.stop()
+            raise
 
     async def stop(self) -> None:
-        if not self._running:
-            return
+        was_running = self._running
         self._running = False
+        remove_listener = getattr(self.cdp_session, "remove_listener", None)
+        if callable(remove_listener):
+            with contextlib.suppress(Exception):
+                remove_listener("Page.screencastFrame", self._frame_handler)
         with contextlib.suppress(asyncio.QueueFull):
             self._emit_queue.put_nowait(None)
-        if self._emit_task:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._emit_task, timeout=1.0)
-        if self._emit_task:
-            self._emit_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._emit_task
-        if self._health_task:
-            self._health_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._health_task
-        with contextlib.suppress(Exception):
-            await self.cdp_session.send("Page.stopScreencast")
+        emit_task = self._emit_task
+        self._emit_task = None
+        if emit_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError, RuntimeError):
+                await asyncio.wait_for(emit_task, timeout=1.0)
+            if not emit_task.done():
+                emit_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+                await emit_task
+        health_task = self._health_task
+        self._health_task = None
+        if health_task is not None:
+            health_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+                await health_task
+        frame_tasks = list(self._frame_tasks)
+        self._frame_tasks.clear()
+        for task in frame_tasks:
+            task.cancel()
+        if frame_tasks:
+            with contextlib.suppress(RuntimeError):
+                await asyncio.gather(*frame_tasks, return_exceptions=True)
+        if was_running:
+            with contextlib.suppress(Exception):
+                await self.cdp_session.send("Page.stopScreencast")
 
     async def _start_screencast(self) -> None:
         self.monitor.mark_restart()
@@ -172,37 +192,54 @@ class CDPScreencastStreamer:
                     degraded = self.request_degrade()
                     if not degraded:
                         self._fallback_requested.set()
-        except asyncio.CancelledError:
-            raise
+        except (asyncio.CancelledError, GeneratorExit, RuntimeError):
+            return
 
     def _on_screencast_frame(self, params: dict[str, Any]) -> None:
-        asyncio.create_task(self._ack_and_emit(params))
+        if not self._running:
+            return
+        task = asyncio.create_task(self._ack_and_emit(params))
+        self._frame_tasks.add(task)
+        task.add_done_callback(self._frame_tasks.discard)
 
     async def _ack_and_emit(self, params: dict[str, Any]) -> None:
-        self.monitor.mark_frame()
-        self._frame_seq += 1
-        await self.cdp_session.send(
-            "Page.screencastFrameAck", {"sessionId": params["sessionId"]}
-        )
-        payload = {
-            "mime_type": f"image/{self.presets[self._preset_index].format}",
-            "data_base64": params["data"],
-            "frame_seq": self._frame_seq,
-        }
-        if self._emit_queue.full():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                _ = self._emit_queue.get_nowait()
-        with contextlib.suppress(asyncio.QueueFull):
-            self._emit_queue.put_nowait(payload)
+        try:
+            if not self._running:
+                return
+            self.monitor.mark_frame()
+            self._frame_seq += 1
+            await self.cdp_session.send(
+                "Page.screencastFrameAck", {"sessionId": params["sessionId"]}
+            )
+            payload = {
+                "mime_type": f"image/{self.presets[self._preset_index].format}",
+                "data_base64": params["data"],
+                "frame_seq": self._frame_seq,
+            }
+            if not self._running:
+                return
+            if self._emit_queue.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    _ = self._emit_queue.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                self._emit_queue.put_nowait(payload)
+        except asyncio.CancelledError:
+            return
 
     async def _emit_loop(self) -> None:
-        while self._running or not self._emit_queue.empty():
-            payload = await self._emit_queue.get()
-            if payload is None:
-                continue
-            self._frame_emitted_event.set()
-            self._frame_emitted_event = asyncio.Event()
-            await self.emit_frame(payload)
+        try:
+            while self._running or not self._emit_queue.empty():
+                try:
+                    payload = await self._emit_queue.get()
+                except (asyncio.CancelledError, GeneratorExit, RuntimeError):
+                    return
+                if payload is None:
+                    continue
+                self._frame_emitted_event.set()
+                self._frame_emitted_event = asyncio.Event()
+                await self.emit_frame(payload)
+        except (asyncio.CancelledError, GeneratorExit, RuntimeError):
+            return
 
 
 class ScreenshotPollStreamer:
@@ -245,25 +282,28 @@ class ScreenshotPollStreamer:
         return self._frame_emitted_event
 
     async def _run(self) -> None:
-        while self._running:
-            self._frame_seq += 1
-            screenshot_kwargs: dict[str, Any] = {
-                "type": self.profile_config.screenshot_format,
-            }
-            if self.profile_config.screenshot_quality is not None:
-                screenshot_kwargs["quality"] = self.profile_config.screenshot_quality
-            data = await self.page.screenshot(**screenshot_kwargs)
-            if isinstance(data, str):
-                encoded = data
-            else:
-                encoded = base64.b64encode(data).decode("ascii")
-            self._frame_emitted_event.set()
-            self._frame_emitted_event = asyncio.Event()
-            await self.emit_frame(
-                {
-                    "mime_type": f"image/{self.profile_config.screenshot_format}",
-                    "data_base64": encoded,
-                    "frame_seq": self._frame_seq,
+        try:
+            while self._running:
+                self._frame_seq += 1
+                screenshot_kwargs: dict[str, Any] = {
+                    "type": self.profile_config.screenshot_format,
                 }
-            )
-            await asyncio.sleep(self.interval_seconds)
+                if self.profile_config.screenshot_quality is not None:
+                    screenshot_kwargs["quality"] = self.profile_config.screenshot_quality
+                data = await self.page.screenshot(**screenshot_kwargs)
+                if isinstance(data, str):
+                    encoded = data
+                else:
+                    encoded = base64.b64encode(data).decode("ascii")
+                self._frame_emitted_event.set()
+                self._frame_emitted_event = asyncio.Event()
+                await self.emit_frame(
+                    {
+                        "mime_type": f"image/{self.profile_config.screenshot_format}",
+                        "data_base64": encoded,
+                        "frame_seq": self._frame_seq,
+                    }
+                )
+                await asyncio.sleep(self.interval_seconds)
+        except (asyncio.CancelledError, GeneratorExit, RuntimeError):
+            return
