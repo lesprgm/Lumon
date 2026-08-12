@@ -2,7 +2,11 @@
   "name": "lumon-opencode-plugin",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test tests/lumonPluginCore.test.js"
+  },
   "dependencies": {
-    "@opencode-ai/plugin": "1.4.7"
+    "@opencode-ai/plugin": "1.4.7",
+    "ws": "^8.21.3"
   }
 }

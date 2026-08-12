@@ -25,6 +25,11 @@ backend/.mypy_cache/
 /output/**
 /.opencode/logs/
 /scripts/
+/tools/
+/.playwright-cli/
+/*.zip
+/agent_vs_first_frame_last5.csv
+/agent_vs_first_frame_last5.png
 /logs/
 /.xdg-cache/
 /.xdg-data/
