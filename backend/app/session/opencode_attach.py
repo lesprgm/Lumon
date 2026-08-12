@@ -100,5 +100,8 @@ class OpenCodeAttachService:
 
     def prune_runtime(self, runtime: Any) -> None:
         observed_session_id = getattr(runtime._connector, "observed_session_id", None)
-        if observed_session_id:
+        if (
+            observed_session_id
+            and self._session_map.get(str(observed_session_id)) == runtime.session_id
+        ):
             self._session_map.pop(str(observed_session_id), None)

@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.protocol.enums import ActionType, AgentKind, AgentRuntimeState, RiskLevel, SubagentSource, VisibilityMode
+from app.protocol.enums import (
+    ActionType,
+    AgentKind,
+    AgentRuntimeState,
+    RiskLevel,
+    SubagentSource,
+    VisibilityMode,
+)
 from app.utils.ids import new_id, utc_timestamp
-
 
 STATE_MAP: dict[str, AgentRuntimeState] = {
     "thinking": AgentRuntimeState.THINKING,

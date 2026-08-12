@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from app.config import DEFAULT_ADAPTER_ID, PROTOCOL_VERSION
 from app.protocol.enums import (
     ActionType,
@@ -16,6 +14,7 @@ from app.protocol.enums import (
     SubagentSource,
     VisibilityMode,
 )
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -118,7 +117,6 @@ class SessionStatePayload(StrictModel):
     observer_mode: bool | None = None
     web_mode: Literal["observe_only", "delegate_playwright"] | None = None
     web_bridge: Literal["playwright_native"] | None = None
-    sprite_family: Literal["lobster", "dog"] = "lobster"
     state: SessionState
     interaction_mode: InteractionMode
     takeover_mode: Literal["remote", "direct"] | None = None
@@ -326,7 +324,7 @@ class AgentEventPayload(StrictModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_subagent_source(self) -> "AgentEventPayload":
+    def validate_subagent_source(self) -> AgentEventPayload:
         if (
             self.agent_kind == AgentKind.SAME_SCENE_SUBAGENT
             and self.subagent_source is None

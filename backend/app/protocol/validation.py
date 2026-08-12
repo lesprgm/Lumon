@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import ValidationError
-
 from app.protocol.enums import ErrorCode
-from app.protocol.models import CLIENT_MESSAGE_MODELS, SERVER_MESSAGE_MODELS, CommandEnvelope
+from app.protocol.models import (
+    CLIENT_MESSAGE_MODELS,
+    SERVER_MESSAGE_MODELS,
+    CommandEnvelope,
+)
+from pydantic import ValidationError
 
 
 class ProtocolValidationError(Exception):

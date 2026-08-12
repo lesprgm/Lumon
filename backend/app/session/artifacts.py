@@ -15,7 +15,6 @@ from app.protocol.models import (
     SessionMetrics,
 )
 
-
 FALSE_OPEN_THRESHOLD_MS = 3_000
 
 
@@ -156,10 +155,7 @@ class SessionArtifactRecorder:
         self._update_first_frame_latency()
 
     def record_frame(self, mime_type: str, data_base64: str) -> None:
-        try:
-            raw = base64.b64decode(data_base64)
-        except Exception:
-            return
+        raw = base64.b64decode(data_base64, validate=True)
         extension = ".png" if mime_type == "image/png" else ".jpg"
         self.latest_frame = (extension, raw)
 
