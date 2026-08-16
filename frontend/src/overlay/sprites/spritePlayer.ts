@@ -6,18 +6,6 @@ import type {
 } from "./types";
 import { resolveSpriteAssetPath } from "./spriteLoader";
 
-function recommendedTransitionKey(
-  animationId: LumonSpriteAnimationId,
-): "on_success_complete" | "on_error_complete" | null {
-  if (animationId === "success") {
-    return "on_success_complete";
-  }
-  if (animationId === "error") {
-    return "on_error_complete";
-  }
-  return null;
-}
-
 export class SpritePlayer {
   private readonly manifest: SpriteRuntimeManifest;
   private readonly assetBasePath: string;
@@ -27,7 +15,7 @@ export class SpritePlayer {
   constructor(manifest: SpriteRuntimeManifest, assetBasePath = "") {
     this.manifest = manifest;
     this.assetBasePath = assetBasePath;
-    this.activeAnimationId = manifest.default_animation;
+    this.activeAnimationId = "idle";
   }
 
   get animationId(): LumonSpriteAnimationId {
@@ -61,26 +49,10 @@ export class SpritePlayer {
     if (actionAnimation === "success" || actionAnimation === "error") {
       return actionAnimation;
     }
-    if (input.isMoving && this.manifest.runtime_state_map.moving_animation) {
+    if (input.isMoving) {
       return this.manifest.runtime_state_map.moving_animation;
     }
-
-    const candidates = new Set<LumonSpriteAnimationId>();
-    if (sessionAnimation) {
-      candidates.add(sessionAnimation);
-    }
-    if (actionAnimation) {
-      candidates.add(actionAnimation);
-    }
-    candidates.add(this.manifest.runtime_state_map.default);
-
-    for (const animationId of this.manifest.runtime_state_map.priority) {
-      if (candidates.has(animationId)) {
-        return animationId;
-      }
-    }
-
-    return this.manifest.default_animation;
+    return actionAnimation ?? sessionAnimation ?? "idle";
   }
 
   syncToRuntime(input: SpriteRuntimeInput, nowMs: number): void {
@@ -94,45 +66,34 @@ export class SpritePlayer {
 
     const animationId = this.activeAnimationId;
     const animation = this.manifest.animations[animationId];
+    const frameCount = animation.frame_paths.length;
     const elapsedMs = Math.max(0, nowMs - this.animationStartedAtMs);
 
     if (!animation.loop) {
-      const fullDurationMs = animation.frame_count * animation.frame_duration_ms;
+      const fullDurationMs = frameCount * animation.frame_duration_ms;
       const holdUntilMs = fullDurationMs + animation.hold_last_frame_ms;
 
       if (elapsedMs >= holdUntilMs) {
-        const transitionKey = recommendedTransitionKey(animationId);
-        if (transitionKey) {
-          const nextAnimation = this.manifest.recommended_transitions[transitionKey].next_animation;
-          this.setAnimation(nextAnimation, nowMs, { restart: true });
-          return this.update(nowMs);
-        }
+        this.setAnimation("idle", nowMs, { restart: true });
+        return this.update(nowMs);
       }
     }
 
     let frameIndex = 0;
-    let isOneShotComplete = false;
 
     if (animation.loop) {
-      frameIndex = Math.floor(elapsedMs / animation.frame_duration_ms) % animation.frame_count;
+      frameIndex = Math.floor(elapsedMs / animation.frame_duration_ms) % frameCount;
     } else {
       const rawFrameIndex = Math.floor(elapsedMs / animation.frame_duration_ms);
-      frameIndex = Math.min(rawFrameIndex, animation.frame_count - 1);
-      isOneShotComplete =
-        elapsedMs >= animation.frame_count * animation.frame_duration_ms + animation.hold_last_frame_ms;
+      frameIndex = Math.min(rawFrameIndex, frameCount - 1);
     }
 
     return {
       animationId,
-      frameIndex,
       framePath: resolveSpriteAssetPath(
         animation.frame_paths[frameIndex],
         this.assetBasePath,
-        this.manifest.asset_root,
       ),
-      elapsedMs,
-      isOneShotComplete,
-      anchor: this.manifest.default_anchor,
     };
   }
 }

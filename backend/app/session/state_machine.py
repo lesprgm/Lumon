@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from app.protocol.enums import InteractionMode, SessionState
 
-
 ALLOWED_TRANSITIONS: dict[SessionState, set[SessionState]] = {
     SessionState.IDLE: {SessionState.STARTING, SessionState.STOPPED},
     SessionState.STARTING: {SessionState.RUNNING, SessionState.FAILED, SessionState.STOPPED},

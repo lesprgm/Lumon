@@ -2,25 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import os
-from typing import Any, Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
-import av
-import aiortc.codecs.vpx
 import aiortc.codecs.h264
+import aiortc.codecs.vpx
+import av
 from aiortc import (
+    RTCConfiguration,
+    RTCIceCandidate,
+    RTCIceServer,
     RTCPeerConnection,
     RTCSessionDescription,
-    RTCIceCandidate,
-    RTCConfiguration,
-    RTCIceServer,
     VideoStreamTrack,
 )
 from aiortc.sdp import candidate_from_sdp
 
 from app.streaming.stream_profile import StreamProfileConfig, default_stream_profile
-
 
 # Monkey-patch default start bitrates to 4 Mbps for high quality browser streaming
 aiortc.codecs.vpx.DEFAULT_BITRATE = 4000000
@@ -117,14 +118,10 @@ class FrameQueueVideoTrack(VideoStreamTrack):
     def _enqueue_frame(self, frame: av.VideoFrame) -> None:
         self._last_frame = frame
         if self._queue.full():
-            try:
+            with contextlib.suppress(asyncio.QueueEmpty):
                 _ = self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        try:
+        with contextlib.suppress(asyncio.QueueFull):
             self._queue.put_nowait(frame)
-        except asyncio.QueueFull:
-            pass
 
     async def recv(self) -> av.VideoFrame:
         now = asyncio.get_running_loop().time()
@@ -232,14 +229,18 @@ class WebRTCSession:
         self._on_ready = on_ready
         self._peer.on("icecandidate", self._handle_ice_candidate)
         self._peer.on("connectionstatechange", self._handle_connection_state_change)
+        self._decode_tasks: set[asyncio.Task[None]] = set()
+
+    def _start_decode(self, operation: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(operation)
+        self._decode_tasks.add(task)
+        task.add_done_callback(self._decode_tasks.discard)
 
     def push_frame(self, mime_type: str, data_base64: str) -> None:
-        loop = asyncio.get_running_loop()
-        loop.create_task(self._decode_and_push(mime_type, data_base64))
+        self._start_decode(self._decode_and_push(mime_type, data_base64))
 
     def push_frame_bytes(self, mime_type: str, data: bytes) -> None:
-        loop = asyncio.get_running_loop()
-        loop.create_task(self._decode_and_push_bytes(mime_type, data))
+        self._start_decode(self._decode_and_push_bytes(mime_type, data))
 
     async def _decode_and_push(self, mime_type: str, data_base64: str) -> None:
         await asyncio.to_thread(self._track.push_frame, mime_type, data_base64)
@@ -303,6 +304,12 @@ class WebRTCSession:
             return
 
     async def close(self) -> None:
+        decode_tasks = list(self._decode_tasks)
+        self._decode_tasks.clear()
+        for task in decode_tasks:
+            task.cancel()
+        if decode_tasks:
+            await asyncio.gather(*decode_tasks, return_exceptions=True)
         await self._peer.close()
 
     def _handle_ice_candidate(self, candidate: RTCIceCandidate | None) -> None:

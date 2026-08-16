@@ -1,27 +1,10 @@
 import type { SpriteRuntimeManifest } from "./types";
 
+export const LOBSTER_ASSET_BASE_PATH = "/assets/lobster";
+
 export const lobsterRuntimeManifest = {
-  sprite_id: "lumon_lobster_v1",
-  version: 1,
-  asset_root: ".",
-  logical_canvas: {
-    width: 1752,
-    height: 2432,
-  },
-  default_anchor: {
-    kind: "bottom_center",
-    normalized_x: 0.5,
-    normalized_y: 1.0,
-    pixel_x: 876,
-    pixel_y: 2432,
-  },
-  default_animation: "idle",
   animations: {
-    // Available sprite states in the current lobster sheet. The top-bar mascot
-    // only uses a subset of these: idle, busy, and success.
     idle: {
-      sheet_path: "idle/idle_sheet_normalized.png",
-      frames_dir: "idle/frames",
       frame_paths: [
         "idle/frames/idle_01.png",
         "idle/frames/idle_02.png",
@@ -32,15 +15,11 @@ export const lobsterRuntimeManifest = {
         "idle/frames/idle_03.png",
         "idle/frames/idle_02.png",
       ],
-      frame_count: 8,
-      fps: 8,
       frame_duration_ms: 125,
       loop: true,
       hold_last_frame_ms: 0,
     },
     locomotion: {
-      sheet_path: "locomotion/locomotion_sheet_normalized.png",
-      frames_dir: "locomotion/frames",
       frame_paths: [
         "locomotion/frames/locomotion_01.png",
         "locomotion/frames/locomotion_01.png",
@@ -51,15 +30,11 @@ export const lobsterRuntimeManifest = {
         "locomotion/frames/locomotion_05.png",
         "locomotion/frames/locomotion_06.png",
       ],
-      frame_count: 8,
-      fps: 10,
       frame_duration_ms: 100,
       loop: true,
       hold_last_frame_ms: 0,
     },
     busy: {
-      sheet_path: "busy/busy_sheet_normalized.png",
-      frames_dir: "busy/frames",
       frame_paths: [
         "busy/frames/busy_01.png",
         "busy/frames/busy_02.png",
@@ -72,15 +47,11 @@ export const lobsterRuntimeManifest = {
         "busy/frames/busy_03.png",
         "busy/frames/busy_02.png",
       ],
-      frame_count: 10,
-      fps: 10,
       frame_duration_ms: 100,
       loop: true,
       hold_last_frame_ms: 0,
     },
     reading: {
-      sheet_path: "reading/reading_sheet_normalized.png",
-      frames_dir: "reading/frames",
       frame_paths: [
         "reading/frames/reading_01.png",
         "reading/frames/reading_02.png",
@@ -93,15 +64,11 @@ export const lobsterRuntimeManifest = {
         "reading/frames/reading_03.png",
         "reading/frames/reading_02.png",
       ],
-      frame_count: 10,
-      fps: 8,
       frame_duration_ms: 120,
       loop: true,
       hold_last_frame_ms: 0,
     },
     success: {
-      sheet_path: "success/success_sheet_normalized.png",
-      frames_dir: "success/frames",
       frame_paths: [
         "success/frames/success_01.png",
         "success/frames/success_02.png",
@@ -112,15 +79,11 @@ export const lobsterRuntimeManifest = {
         "success/frames/success_06.png",
         "success/frames/success_06.png",
       ],
-      frame_count: 8,
-      fps: 7,
       frame_duration_ms: 140,
       loop: false,
       hold_last_frame_ms: 450,
     },
     error: {
-      sheet_path: "error/error_sheet_normalized.png",
-      frames_dir: "error/frames",
       frame_paths: [
         "error/frames/error_01.png",
         "error/frames/error_02.png",
@@ -131,8 +94,6 @@ export const lobsterRuntimeManifest = {
         "error/frames/error_06.png",
         "error/frames/error_06.png",
       ],
-      frame_count: 8,
-      fps: 6,
       frame_duration_ms: 166,
       loop: false,
       hold_last_frame_ms: 700,
@@ -161,19 +122,6 @@ export const lobsterRuntimeManifest = {
       complete: "success",
       error: "error",
     },
-    // Locomotion is reserved for in-page runtime movement, not the idle top-bar mascot.
     moving_animation: "locomotion",
-    priority: ["error", "success", "busy", "reading", "locomotion", "idle"],
-    default: "idle",
-  },
-  recommended_transitions: {
-    on_success_complete: {
-      next_animation: "idle",
-      delay_ms: 450,
-    },
-    on_error_complete: {
-      next_animation: "idle",
-      delay_ms: 700,
-    },
   },
 } satisfies SpriteRuntimeManifest;

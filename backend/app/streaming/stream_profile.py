@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
-
 StreamProfileName = Literal["demo_local"]
 ScreenshotFormat = Literal["jpeg", "png"]
 

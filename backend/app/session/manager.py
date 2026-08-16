@@ -7,10 +7,6 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import WebSocket, WebSocketException
-from fastapi.websockets import WebSocketState
-from starlette.status import WS_1008_POLICY_VIOLATION
-
 from app.adapters.registry import create_connector
 from app.config import (
     DEFAULT_ADAPTER_ID,
@@ -24,26 +20,30 @@ from app.optional.langsmith_bridge import (
 )
 from app.protocol.enums import ErrorCode, SessionState
 from app.protocol.models import (
+    AttachObserverPayload,
+    BridgeOfferPayload,
     BrowserCommandRecord,
     BrowserCommandRequest,
     BrowserCommandResult,
     BrowserContextPayload,
-    BridgeOfferPayload,
     ErrorPayload,
     LocalObserveOpenCodeRequest,
     TaskResultPayload,
     UiTelemetryPayload,
 )
-from app.session.artifacts import SessionArtifactRecorder
-from app.session.opencode_attach import OpenCodeAttachService
 from app.protocol.validation import (
     ProtocolValidationError,
     validate_client_message,
     validate_server_message,
 )
+from app.session.artifacts import SessionArtifactRecorder
+from app.session.opencode_attach import OpenCodeAttachService
 from app.session.state_machine import can_transition, interaction_mode_for_state
 from app.streaming.webrtc import WebRTCSession, parse_ice_servers
 from app.utils.ids import new_id, utc_timestamp
+from fastapi import WebSocket, WebSocketException
+from fastapi.websockets import WebSocketState
+from starlette.status import WS_1008_POLICY_VIOLATION
 
 TERMINAL_STATES = {
     SessionState.IDLE,
@@ -111,7 +111,6 @@ class SessionRuntime:
         self.observer_mode = False
         self.web_mode: str | None = None
         self.web_bridge: str | None = None
-        self.sprite_family = "lobster"
         self.task_text = ""
         self.state = SessionState.IDLE
         self.active_checkpoint_id: str | None = None
@@ -123,6 +122,7 @@ class SessionRuntime:
         self._optional_trace_history: deque[str] = deque(maxlen=32)
         self._disconnect_grace_seconds = disconnect_grace_seconds
         self._disconnect_task: asyncio.Task[None] | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._on_terminal_no_connections = on_terminal_no_connections
         self._connector = create_connector(self, self.adapter_id)
         self._artifact = SessionArtifactRecorder(
@@ -180,6 +180,15 @@ class SessionRuntime:
     def timestamp(self) -> str:
         return utc_timestamp()
 
+    def _schedule_broadcast(self, message: dict[str, Any]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.broadcast(message))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def connect(self, websocket: WebSocket) -> None:
         self._cancel_disconnect_task()
         had_connections = bool(self._connections)
@@ -201,6 +210,15 @@ class SessionRuntime:
             self._notify_terminal_no_connections()
             return
         self._schedule_disconnect_stop()
+
+    @contextlib.asynccontextmanager
+    async def browser_command_activity(self):
+        self._cancel_disconnect_task()
+        try:
+            yield
+        finally:
+            if self._has_connected_once and not self._connections and not self.is_terminal():
+                self._schedule_disconnect_stop()
 
     async def handle_client_message(self, message: dict[str, Any]) -> None:
         try:
@@ -334,16 +352,6 @@ class SessionRuntime:
                         stale_reason,
                         command_type=message_type,
                     )
-                return
-
-            if message_type == "set_sprite_family":
-                self.sprite_family = (
-                    "dog" if payload.get("family") == "dog" else "lobster"
-                )
-                set_sprite_family = getattr(self._connector, "set_sprite_family", None)
-                if set_sprite_family is not None:
-                    await set_sprite_family(self.sprite_family)
-                await self.emit_session_state()
                 return
 
             if message_type == "webrtc_request":
@@ -493,7 +501,6 @@ class SessionRuntime:
             "observer_mode": self.observer_mode,
             "web_mode": self.web_mode,
             "web_bridge": self.web_bridge,
-            "sprite_family": self.sprite_family,
             "state": self.state.value,
             "interaction_mode": interaction_mode_for_state(self.state).value,
             "takeover_mode": getattr(self._connector, "takeover_mode", None),
@@ -613,9 +620,7 @@ class SessionRuntime:
                     "meta": enriched,
                 },
             }
-            with contextlib.suppress(RuntimeError):
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.broadcast(diagnostic_message))
+            self._schedule_broadcast(diagnostic_message)
 
     async def emit_approval_required(self, payload: dict[str, Any]) -> None:
         enriched = dict(payload)
@@ -785,7 +790,7 @@ class SessionRuntime:
             self._artifact.start_intervention(
                 intervention_id=intervention_id,
                 kind="manual_control",
-                headline="You’re in control",
+                headline="You're in control",
                 reason_text="Lumon handed the browser over to you.",
                 started_at=self.timestamp(),
                 source_url=context.url if context else None,
@@ -880,10 +885,11 @@ class SessionRuntime:
     async def _disconnect_after_grace(self) -> None:
         try:
             await asyncio.sleep(self._disconnect_grace_seconds)
-            if self._connections or self.is_terminal():
-                return
-            await self._connector.stop()
-            await self.transition_to(SessionState.STOPPED)
+            async with self._lock:
+                if self._connections or self.is_terminal():
+                    return
+                await self._connector.stop()
+                await self.transition_to(SessionState.STOPPED)
         except asyncio.CancelledError:
             return
         finally:
@@ -987,11 +993,7 @@ class SessionRuntime:
         payload = record.model_dump(mode="json")
         self._recent_browser_command_payloads.append(payload)
         self._artifact.append_event({"type": "browser_command", "payload": payload})
-        with contextlib.suppress(RuntimeError):
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                self.broadcast({"type": "browser_command", "payload": payload})
-            )
+        self._schedule_broadcast({"type": "browser_command", "payload": payload})
 
     def record_ui_telemetry(self, payload: UiTelemetryPayload) -> None:
         timestamp = payload.timestamp or self.timestamp()
@@ -1155,19 +1157,15 @@ class SessionRuntime:
         self._webrtc_ready = False
 
         def on_ice_candidate(candidate_payload: dict[str, Any]) -> None:
-            with contextlib.suppress(RuntimeError):
-                loop = asyncio.get_running_loop()
-                loop.create_task(
-                    self.broadcast({"type": "webrtc_ice", "payload": candidate_payload})
-                )
+            self._schedule_broadcast(
+                {"type": "webrtc_ice", "payload": candidate_payload}
+            )
 
         def on_ready() -> None:
             self._webrtc_ready = True
-            with contextlib.suppress(RuntimeError):
-                loop = asyncio.get_running_loop()
-                loop.create_task(
-                    self.broadcast({"type": "webrtc_ready", "payload": {"ready": True}})
-                )
+            self._schedule_broadcast(
+                {"type": "webrtc_ready", "payload": {"ready": True}}
+            )
 
         self._webrtc_session = WebRTCSession(
             session_id=self.session_id,
@@ -1193,6 +1191,20 @@ class SessionRuntime:
         self._webrtc_ready = False
         with contextlib.suppress(Exception):
             await session.close()
+
+    async def shutdown(self) -> None:
+        disconnect_task = self._disconnect_task
+        self._cancel_disconnect_task()
+        if disconnect_task is not None and disconnect_task is not asyncio.current_task():
+            await asyncio.gather(disconnect_task, return_exceptions=True)
+        await self._close_webrtc()
+        await self._connector.stop()
+        background_tasks = list(self._background_tasks)
+        self._background_tasks.clear()
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 def _serialize_ice_servers(servers: list) -> list[dict[str, Any]]:
@@ -1221,6 +1233,28 @@ class SessionManager:
         self._disconnect_grace_seconds = disconnect_grace_seconds
         self._bootstrap_session_ttl_seconds = bootstrap_session_ttl_seconds
         self._bootstrap_expiry_tasks: dict[str, asyncio.Task[None]] = {}
+
+    async def shutdown(self) -> None:
+        expiry_tasks = list(self._bootstrap_expiry_tasks.values())
+        self._bootstrap_expiry_tasks.clear()
+        for task in expiry_tasks:
+            task.cancel()
+        if expiry_tasks:
+            await asyncio.gather(*expiry_tasks, return_exceptions=True)
+
+        async with self._lock:
+            runtimes = list(self._sessions.values())
+            self._sessions.clear()
+            self._socket_sessions.clear()
+
+        first_error: Exception | None = None
+        for runtime in runtimes:
+            try:
+                await runtime.shutdown()
+            except Exception as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
 
     def create_session(self) -> dict[str, str]:
         runtime = self._new_runtime()
@@ -1367,7 +1401,7 @@ class SessionManager:
                 raise
             runtime._artifact.note_attach_requested(attach_requested_at)
         runtime._artifact.note_attached(runtime.timestamp())
-        async with runtime._lock:
+        async with runtime._lock, runtime.browser_command_activity():
             await runtime.ensure_opencode_browser_delegate(
                 observed_session_id=payload.observed_session_id,
                 task_text=payload.task_text or runtime.task_text,

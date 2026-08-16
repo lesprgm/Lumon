@@ -2,7 +2,6 @@ export type AdapterId = "playwright_native" | "opencode";
 export type WebBridgeId = "playwright_native";
 export type WebModeId = "observe_only" | "delegate_playwright";
 export type StreamProfile = "demo_local";
-export type SpriteFamily = "lobster" | "dog";
 export type SessionState =
   | "idle"
   | "starting"
