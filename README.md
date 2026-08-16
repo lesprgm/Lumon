@@ -52,7 +52,7 @@ Completed runs can then be reviewed afterward through the artifact-backed review
 
 ## Sprite State Guide
 The lobster overlay is not decorative filler. Each state maps to a real runtime condition or action class in the sprite manifest.
-The current lobster sprite set started as generated pixel-art source material from Nanobanana 2. From there, the production frames were cleaned, background-fixed, normalized to a shared canvas, assembled into runtime sheets, and mapped to explicit Lumon states so the overlay reflects what the agent is actually doing instead of acting like a decorative mascot.
+The current lobster sprite set started as generated pixel-art source material from Nanobanana 2. The production frames were cleaned, background-fixed, normalized, and mapped to explicit Lumon states so the overlay reflects what the agent is actually doing.
 
 | State | Preview | Triggered by |
 | --- | --- | --- |
@@ -63,9 +63,7 @@ The current lobster sprite set started as generated pixel-art source material fr
 | `error` | ![Error lobster](docs/assets/readme/lobster_error.gif) | Failed browser task / error terminal state |
 | `locomotion` | ![Locomotion lobster](docs/assets/readme/lobster_locomotion.gif) | In-page movement path used by the overlay engine |
 
-The actual source of truth is:
-- `frontend/public/assets/lobster/runtime_manifest.json`
-- `frontend/src/overlay/sprites/lobsterRuntimeManifest.ts`
+The source of truth is `frontend/src/overlay/sprites/lobsterRuntimeManifest.ts`.
 
 ## Technical Docs
 Detailed architecture and component docs live in `docs/`.
@@ -73,7 +71,6 @@ Detailed architecture and component docs live in `docs/`.
 Start here:
 - `docs/README.md`
 - `docs/ARCHITECTURE.md`
-- `docs/EDGE_CASES.md`
 
 Internally, Lumon still keeps observation and live-browser execution separate, but that distinction is not meant to be a user-facing concept.
 
@@ -276,33 +273,18 @@ These paths still exist for development and tests, but they are **not** the prim
 - manual three-terminal startup
 - standalone `playwright_native` demo mode
 
-### Standalone Playwright Demo
-
-```bash
-cd <repo-root>
-LUMON_HEADLESS=0 ./scripts/start_demo_backend.sh
-```
-
-Then use the frontend preview/replay flow for internal browser-surface checks.
-
 ## Testing
-### Backend
+Run the complete local static/unit/build suite:
+
 ```bash
-cd backend
-pytest -q
+make check
 ```
 
-### Frontend
-```bash
-cd frontend
-npm run test -- --run
-npm run build
-```
+Run the live reliability harnesses after setup:
 
-### Acceptance
 ```bash
-cd <repo-root>
-./scripts/run_acceptance.sh
+make transport
+make harness
 ```
 
 ## Security Posture
