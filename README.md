@@ -20,14 +20,13 @@
   <a href="https://lumon-live.netlify.app"><strong>Netlify mirror</strong></a>
 </p>
 
-Lumon lets you see what your agent is doing online and step in when it matters.
-
-It is a local visual supervision layer that sits beside an existing agent and makes online work legible:
-- what the agent is doing
-- where it is acting
-- when a user should intervene
-
-The product surface is a light observation UI with a large live stage, a sprite overlay, target markers, intent bubbles, approval prompts, and takeover states.
+Lumon is a visualization and supervision layer attached to an existing browser agent;
+it is not the agent itself. Lumon gives a browser agent a visible embodiment inside the
+web environment it is acting on. The lobster is driven by the agent’s actual runtime
+state, so actions such as navigating, reading, clicking, typing, scrolling, succeeding,
+and failing become visible behaviors on the page. Intent bubbles, target markers,
+approvals, and takeover controls let the user watch and supervise the agent while the
+work is happening.
 
 After a run completes, Lumon can also load a step-through review view from the session artifact so you can inspect where the agent went, what it targeted, and where intervention happened.
 
